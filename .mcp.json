@@ -1,0 +1,7 @@
+{
+  "user-memory": {
+    "type": "stdio",
+    "command": "node",
+    "args": ["mcp-server/memory-server.js"]
+  }
+}

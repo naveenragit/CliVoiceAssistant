@@ -1,0 +1,17 @@
+{
+  "name": "copilot-voice-assistant",
+  "description": "Voice interface for GitHub Copilot CLI — speak commands, hear responses. Includes persistent user memory shared across sessions.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Naveen Ra",
+    "email": ""
+  },
+  "license": "MIT",
+  "keywords": ["voice", "assistant", "realtime", "azure-openai", "tts", "stt", "memory"],
+  "category": "productivity",
+  "tags": ["voice-assistant", "accessibility", "hands-free"],
+  "agents": "agents/",
+  "skills": ["skills/"],
+  "mcpServers": ".mcp.json",
+  "hooks": "hooks.json"
+}
