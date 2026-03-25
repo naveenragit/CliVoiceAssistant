@@ -56,6 +56,7 @@ public sealed class MainForm : Form
     private bool                    _connected;
     private bool                    _pttHeld;    // tracks spacebar/button hold state
     private EmbeddedTerminal?       _terminal;   // embedded Copilot CLI terminal
+    private NarrationServer?        _narration;  // local WebSocket server for CLI narration
 
     // Delta accumulation: Realtime API sends text in tiny chunks; we buffer
     // them and render only on the final `done` event.
@@ -313,6 +314,10 @@ public sealed class MainForm : Form
         // Set split position now that form has its actual size (65% terminal, 35% voice)
         try { _splitter.SplitterDistance = (int)((_splitter.Height - _splitter.SplitterWidth) * 0.65); }
         catch { /* ignore if form too small */ }
+
+        // Start the narration server so Copilot CLI can send spoken summaries
+        _narration = new NarrationServer(_tts);
+        _narration.Start();
 
         // Start the embedded Copilot CLI terminal
         _ = StartEmbeddedTerminalAsync();
@@ -834,6 +839,10 @@ public sealed class MainForm : Form
         _spinnerTimer?.Dispose();
         _terminal?.Dispose();
         _terminal = null;
+
+        // Clean up narration server
+        if (_narration != null)
+            await _narration.DisposeAsync();
 
         if (_client != null)
         {

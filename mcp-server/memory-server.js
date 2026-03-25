@@ -8,6 +8,10 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
+// ── Configuration ────────────────────────────────────────────────────────────
+const NARRATION_PORT = 9877;
+const NARRATION_URL = `http://localhost:${NARRATION_PORT}/`;
+
 // ── Memory file path ─────────────────────────────────────────────────────────
 const MEMORY_DIR = join(homedir(), ".copilot");
 const MEMORY_FILE = join(MEMORY_DIR, "user-memory.json");
@@ -83,6 +87,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["key"],
       },
     },
+    {
+      name: "narrate",
+      description:
+        "Send text to the Voice Assistant so it can read it aloud to the user. " +
+        "Use this after completing a task to give the user a brief spoken summary of what you did. " +
+        "Keep narrations concise — 1-3 sentences, conversational tone, suitable for speech.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          text: {
+            type: "string",
+            description:
+              "The text to speak aloud. Should be a concise, spoken-friendly summary.",
+          },
+        },
+        required: ["text"],
+      },
+    },
   ],
 }));
 
@@ -152,6 +174,40 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           { type: "text", text: `Forgot: '${key}' (${Object.keys(memory).length} facts remaining)` },
         ],
       };
+    }
+
+    case "narrate": {
+      const { text } = args;
+      if (!text) {
+        return {
+          content: [{ type: "text", text: "Error: 'text' is required." }],
+          isError: true,
+        };
+      }
+      try {
+        const res = await fetch(NARRATION_URL, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain" },
+          body: text,
+          signal: AbortSignal.timeout(5000),
+        });
+        if (res.ok) {
+          return {
+            content: [{ type: "text", text: `Narration sent to Voice Assistant (${text.length} chars).` }],
+          };
+        } else {
+          return {
+            content: [{ type: "text", text: `Voice Assistant returned HTTP ${res.status}. It may not be running.` }],
+          };
+        }
+      } catch (err) {
+        return {
+          content: [{
+            type: "text",
+            text: `Could not reach Voice Assistant at ${NARRATION_URL}. Is it running? (${err.message})`,
+          }],
+        };
+      }
     }
 
     default:
