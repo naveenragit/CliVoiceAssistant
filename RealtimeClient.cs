@@ -706,6 +706,48 @@ public sealed class RealtimeClient : IAsyncDisposable
         return samples > 0 ? (float)Math.Sqrt(sum / samples) / 32768f : 0f;
     }
 
+    /// <summary>
+    /// Inject text into the conversation and have the Realtime API speak it aloud.
+    /// Used for CLI narration so responses use the same natural voice.
+    /// </summary>
+    public async Task SpeakTextAsync(string text)
+    {
+        if (!_connected || _ws?.State != WebSocketState.Open)
+        {
+            AppLog.Warn("SpeakTextAsync: not connected, skipping.");
+            return;
+        }
+
+        AppLog.Info($"SpeakTextAsync: injecting {text.Length} chars for TTS");
+
+        // Add the text as an assistant message in the conversation
+        await SendJsonAsync(new
+        {
+            type = "conversation.item.create",
+            item = new
+            {
+                type    = "message",
+                role    = "assistant",
+                content = new[]
+                {
+                    new { type = "input_text", text = text }
+                }
+            }
+        });
+
+        // Ask the model to generate audio for this text
+        await SendJsonAsync(new
+        {
+            type = "response.create",
+            response = new
+            {
+                modalities   = new[] { "audio" },
+                instructions = $"Read the following text aloud exactly as written, naturally and conversationally. Do not add commentary or extra words:\n\n{text}",
+                tool_choice  = "none",
+            }
+        });
+    }
+
     public async ValueTask DisposeAsync()
     {
         await _cts.CancelAsync();

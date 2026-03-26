@@ -14,11 +14,12 @@ public sealed class NarrationServer : IAsyncDisposable
 
     private HttpListener? _listener;
     private CancellationTokenSource _cts = new();
-    private readonly VoiceOutput _tts;
+    private readonly Func<string, Task>? _speakAsync;
 
-    public NarrationServer(VoiceOutput tts)
+    /// <param name="speakAsync">Async callback to speak narration text via Realtime API.</param>
+    public NarrationServer(Func<string, Task>? speakAsync = null)
     {
-        _tts = tts;
+        _speakAsync = speakAsync;
     }
 
     /// <summary>Start listening for narration messages.</summary>
@@ -160,8 +161,15 @@ public sealed class NarrationServer : IAsyncDisposable
         // Show in voice chat panel
         UIMessageBus.Push(MessageRole.Assistant, text, readAloud: false);
 
-        // Speak via TTS
-        _tts.Enqueue(text);
+        // Speak via Realtime API (natural voice)
+        if (_speakAsync != null)
+        {
+            _ = Task.Run(async () =>
+            {
+                try { await _speakAsync(text); }
+                catch (Exception ex) { AppLog.Warn($"NarrationServer: speak failed: {ex.Message}"); }
+            });
+        }
     }
 
     public async ValueTask DisposeAsync()

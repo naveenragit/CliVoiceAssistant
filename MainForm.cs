@@ -318,8 +318,12 @@ public sealed class MainForm : Form
         // Register MCP server so the embedded CLI has the narrate tool
         McpInstaller.EnsureRegistered();
 
-        // Start the narration server so Copilot CLI can send spoken summaries
-        _narration = new NarrationServer(_tts);
+        // Start the narration server — route speech through Realtime API
+        _narration = new NarrationServer(async text =>
+        {
+            if (_client != null)
+                await _client.SpeakTextAsync(text);
+        });
         _narration.Start();
 
         // Start the embedded Copilot CLI terminal
