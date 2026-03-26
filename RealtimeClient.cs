@@ -597,8 +597,10 @@ public sealed class RealtimeClient : IAsyncDisposable
         });
 
         // If the result contains an error, instruct the model to read it aloud clearly.
-        // Otherwise just let it continue naturally.
+        // For CLI/selection tools that succeed, stay silent — the user sees the result on screen.
         var isError = result.Contains("\"error\"");
+        var isSilentTool = name is CopilotCliTool.FunctionName or "select_option";
+
         if (isError)
         {
             await SendJsonAsync(new
@@ -611,17 +613,15 @@ public sealed class RealtimeClient : IAsyncDisposable
                 }
             });
         }
-        else
+        else if (!isSilentTool)
         {
-            // tool_choice = "none" prevents the model from calling another tool
-            // (which would create a feedback loop sending CLI output back to CLI).
-            // It will only generate speech to read the result aloud.
             await SendJsonAsync(new
             {
                 type = "response.create",
                 response = new { tool_choice = "none" }
             });
         }
+        // For successful CLI/selection commands: no response.create — stay silent
     }
 
     private static async Task<string> ExecuteCopilotCliToolAsync(string argsJson)
@@ -793,6 +793,18 @@ public sealed class RealtimeClient : IAsyncDisposable
             return;
         }
 
+        // Wait for any in-progress response to finish before injecting
+        var waited = 0;
+        while (_responseInProgress && waited < 15000)
+        {
+            await Task.Delay(500);
+            waited += 500;
+        }
+        if (_responseInProgress)
+        {
+            AppLog.Warn("SpeakTextAsync: response still in progress after 15s, proceeding anyway.");
+        }
+
         AppLog.Info($"SpeakTextAsync: injecting {text.Length} chars for TTS");
 
         // Add the text as an assistant message in the conversation
@@ -805,7 +817,7 @@ public sealed class RealtimeClient : IAsyncDisposable
                 role    = "assistant",
                 content = new[]
                 {
-                    new { type = "input_text", text = text }
+                    new { type = "text", text = text }
                 }
             }
         });
@@ -816,7 +828,7 @@ public sealed class RealtimeClient : IAsyncDisposable
             type = "response.create",
             response = new
             {
-                modalities   = new[] { "audio" },
+                modalities   = new[] { "audio", "text" },
                 instructions = $"Read the following text aloud exactly as written, naturally and conversationally. Do not add commentary or extra words:\n\n{text}",
                 tool_choice  = "none",
             }
