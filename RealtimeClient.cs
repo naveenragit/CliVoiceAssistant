@@ -274,10 +274,15 @@ public sealed class RealtimeClient : IAsyncDisposable
                 " For EVERYTHING else — questions, commands, vague requests, unclear asks —" +
                 " forward to Copilot CLI immediately. Do not think, do not interpret, do not" +
                 " ask follow-up questions. Just forward it." +
+                " When Copilot CLI presents a selection menu (numbered options or arrow-key list)," +
+                " and the user says which option to pick (e.g. 'select option 2', 'the first one'," +
+                " 'yes', 'pick that'), use the select_option tool to navigate with arrow keys" +
+                " and press enter. For option N, send 'down' with repeat=N-1, then send 'enter'." +
+                " If the user just says 'yes' or confirms, send 'enter' to select the current option." +
                 " When Copilot CLI responds, read the key information aloud concisely." +
                 " Always use submit=true.",
             temperature  = 0.6,
-            tools        = new object[] { CopilotCliTool.ToolDefinition, RememberToolDefinition },
+            tools        = new object[] { CopilotCliTool.ToolDefinition, SelectOptionToolDefinition, RememberToolDefinition },
             tool_choice  = "auto",
         },
     });
@@ -497,10 +502,17 @@ public sealed class RealtimeClient : IAsyncDisposable
 
             // ── Response complete (fires after audio+tool calls finish) ───────
             case "response.done":
-                AppLog.Info($"[TIMING] +{_turnTimer.ElapsedMilliseconds}ms  response.done " +
-                    $"status={ev["response"]?["status"]?.ToString() ?? "?"}");
+            {
+                var status = ev["response"]?["status"]?.ToString() ?? "?";
+                AppLog.Info($"[TIMING] +{_turnTimer.ElapsedMilliseconds}ms  response.done status={status}");
+                if (status == "failed")
+                {
+                    var reason = ev["response"]?["status_details"]?.ToString() ?? "unknown";
+                    AppLog.Error($"response.done FAILED: {reason}");
+                }
                 _responseInProgress = false;
                 break;
+            }
 
             // ── Function / tool calls ─────────────────────────────────────────
             // Step 1 — model starts a function call output item
@@ -559,6 +571,7 @@ public sealed class RealtimeClient : IAsyncDisposable
             result = name switch
             {
                 CopilotCliTool.FunctionName => await ExecuteCopilotCliToolAsync(argsJson),
+                "select_option"             => await ExecuteSelectOptionAsync(argsJson),
                 "remember_fact"             => ExecuteRememberTool(argsJson),
                 _                           => $"{{ \"error\": \"unknown tool '{name}'\" }}"
             };
@@ -620,6 +633,68 @@ public sealed class RealtimeClient : IAsyncDisposable
         var message = args["message"]?.ToString() ?? "";
         var submit  = args["submit"]?.Value<bool>() ?? true;
         return await CopilotCliTool.SendAsync(message, submit);
+    }
+
+    // ── Select option tool (arrow key navigation) ──────────────────────────
+
+    private static readonly object SelectOptionToolDefinition = new
+    {
+        type        = "function",
+        name        = "select_option",
+        description = "Navigate and select options in Copilot CLI selection menus. " +
+                      "When Copilot CLI presents a numbered or arrow-key selection list, " +
+                      "use this tool to press arrow keys and Enter to choose an option. " +
+                      "For example, if the user says 'select the second one' or 'pick option 2', " +
+                      "send down arrow presses to reach that option, then press Enter.",
+        parameters  = new
+        {
+            type       = "object",
+            properties = new
+            {
+                key = new
+                {
+                    type        = "string",
+                    description = "The key to send: 'up', 'down', 'enter', 'escape', or 'tab'.",
+                    @enum       = new[] { "up", "down", "enter", "escape", "tab" },
+                },
+                repeat = new
+                {
+                    type        = "integer",
+                    description = "Number of times to press the key. Default 1. " +
+                                  "E.g. to select option 3, send 'down' with repeat=2, then call again with 'enter'.",
+                },
+            },
+            required = new[] { "key" },
+        },
+    };
+
+    private static async Task<string> ExecuteSelectOptionAsync(string argsJson)
+    {
+        JObject args;
+        try { args = JObject.Parse(argsJson); }
+        catch { return "{ \"error\": \"invalid arguments JSON\" }"; }
+
+        var key    = args["key"]?.ToString()?.Trim()?.ToLowerInvariant() ?? "";
+        var repeat = args["repeat"]?.Value<int>() ?? 1;
+        if (repeat < 1) repeat = 1;
+        if (repeat > 20) repeat = 20;
+
+        if (string.IsNullOrEmpty(key))
+            return "{ \"error\": \"key is required\" }";
+
+        var terminal = CopilotCliTool.Terminal;
+        if (terminal is not { IsRunning: true })
+            return "{ \"error\": \"terminal not available\" }";
+
+        try
+        {
+            await terminal.SendKeyAsync(key, repeat);
+            return $"{{ \"success\": true, \"key\": \"{key}\", \"repeat\": {repeat} }}";
+        }
+        catch (Exception ex)
+        {
+            return $"{{ \"error\": \"SendKey failed: {ex.Message}\" }}";
+        }
     }
 
     // ── Remember tool ────────────────────────────────────────────────────────

@@ -72,6 +72,10 @@ public sealed class EmbeddedTerminal : IDisposable
     private const uint WM_KEYDOWN = 0x0100;
     private const uint WM_KEYUP   = 0x0101;
     private const int  VK_RETURN  = 0x0D;
+    private const int  VK_UP      = 0x26;
+    private const int  VK_DOWN    = 0x28;
+    private const int  VK_ESCAPE  = 0x1B;
+    private const int  VK_TAB     = 0x09;
 
     private const uint RDW_INVALIDATE  = 0x0001;
     private const uint RDW_ALLCHILDREN = 0x0080;
@@ -219,6 +223,38 @@ public sealed class EmbeddedTerminal : IDisposable
         }
 
         AppLog.Info("EmbeddedTerminal: keystroke injection complete");
+    }
+
+    /// <summary>
+    /// Send a special key (arrow, enter, escape, tab) to the embedded terminal.
+    /// Used to navigate Copilot CLI selection menus via voice commands.
+    /// </summary>
+    public async Task SendKeyAsync(string key, int repeat = 1)
+    {
+        if (_terminalHwnd == IntPtr.Zero)
+            throw new InvalidOperationException("Terminal window not available");
+
+        int vk = key.ToLowerInvariant() switch
+        {
+            "up"     => VK_UP,
+            "down"   => VK_DOWN,
+            "enter"  => VK_RETURN,
+            "escape" or "esc" => VK_ESCAPE,
+            "tab"    => VK_TAB,
+            _ => throw new ArgumentException($"Unknown key: {key}")
+        };
+
+        Focus();
+        await Task.Delay(50);
+
+        for (int i = 0; i < repeat; i++)
+        {
+            PostMessage(_terminalHwnd, WM_KEYDOWN, (IntPtr)vk, IntPtr.Zero);
+            PostMessage(_terminalHwnd, WM_KEYUP,   (IntPtr)vk, IntPtr.Zero);
+            await Task.Delay(50);
+        }
+
+        AppLog.Info($"EmbeddedTerminal: sent key '{key}' x{repeat}");
     }
 
     /// <summary>Wait for a visible window owned by the given PID.</summary>
