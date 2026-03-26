@@ -73,6 +73,14 @@ public sealed class RealtimeClient : IAsyncDisposable
     public void StartPtt()
     {
         if (!_connected) return;
+
+        // Barge-in: if the model is speaking, interrupt it immediately
+        if (_modelSpeaking || _responseInProgress)
+        {
+            AppLog.Info("PTT barge-in: interrupting model playback");
+            _ = InterruptPlaybackAsync();
+        }
+
         _pttActive     = true;
         _pttAudioBytes = 0;
         AppLog.Info("PTT start");
@@ -381,6 +389,29 @@ public sealed class RealtimeClient : IAsyncDisposable
         var tailMs     = bufferedMs + 500;   // 500ms propagation cushion
         AppLog.Info($"[ECHO-GUARD] playback tail = {bufferedMs}ms buffered + 500ms cushion = {tailMs}ms");
         return tailMs;
+    }
+
+    /// <summary>
+    /// Interrupt model playback immediately (barge-in).
+    /// Cancels the in-progress response, clears the audio buffer, and re-enables the mic.
+    /// </summary>
+    private async Task InterruptPlaybackAsync()
+    {
+        // Stop local playback immediately
+        _modelSpeaking     = false;
+        _responseInProgress = false;
+        _playback?.ClearBuffer();
+
+        // Tell the server to cancel the current response
+        try
+        {
+            await SendJsonAsync(new { type = "response.cancel" });
+            AppLog.Info("Barge-in: response.cancel sent");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"Barge-in: response.cancel failed: {ex.Message}");
+        }
     }
 
     private void HandleEvent(string json)
