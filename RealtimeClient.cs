@@ -838,29 +838,15 @@ public sealed class RealtimeClient : IAsyncDisposable
 
         AppLog.Info($"SpeakTextAsync: injecting {text.Length} chars for TTS");
 
-        // Add the text as an assistant message in the conversation
-        await SendJsonAsync(new
-        {
-            type = "conversation.item.create",
-            item = new
-            {
-                type    = "message",
-                role    = "assistant",
-                content = new[]
-                {
-                    new { type = "text", text = text }
-                }
-            }
-        });
-
-        // Ask the model to generate audio for this text
+        // Trigger a response that reads the text aloud — no conversation item needed.
+        // Putting text in instructions avoids the model treating it as "already said".
         await SendJsonAsync(new
         {
             type = "response.create",
             response = new
             {
                 modalities   = new[] { "audio", "text" },
-                instructions = $"Read the following text aloud exactly as written, naturally and conversationally. Do not add commentary or extra words:\n\n{text}",
+                instructions = $"Read the following text aloud exactly as written. Do not add commentary, follow-up questions, or extra words. Just read it naturally:\n\n{text}",
                 tool_choice  = "none",
             }
         });
