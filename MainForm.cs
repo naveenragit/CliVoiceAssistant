@@ -315,6 +315,9 @@ public sealed class MainForm : Form
         try { _splitter.SplitterDistance = (int)((_splitter.Height - _splitter.SplitterWidth) * 0.65); }
         catch { /* ignore if form too small */ }
 
+        // Register MCP server so the embedded CLI has the narrate tool
+        McpInstaller.EnsureRegistered();
+
         // Start the narration server so Copilot CLI can send spoken summaries
         _narration = new NarrationServer(_tts);
         _narration.Start();
@@ -843,6 +846,9 @@ public sealed class MainForm : Form
         // Clean up narration server
         if (_narration != null)
             await _narration.DisposeAsync();
+
+        // Unregister MCP server from user config
+        McpInstaller.Unregister();
 
         if (_client != null)
         {
