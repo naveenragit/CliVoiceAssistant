@@ -1,6 +1,7 @@
 using Azure.Core;
+using VoiceAssistant.Infrastructure;
 
-namespace VoiceAssistant;
+namespace VoiceAssistant.Auth;
 
 /// <summary>
 /// Monitors Azure AD token expiry and proactively refreshes before it expires.

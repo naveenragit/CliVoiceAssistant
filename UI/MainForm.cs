@@ -1,7 +1,13 @@
 using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
+using VoiceAssistant.Audio;
+using VoiceAssistant.Auth;
+using VoiceAssistant.Config;
+using VoiceAssistant.Infrastructure;
+using VoiceAssistant.Networking;
+using VoiceAssistant.Tools;
 
-namespace VoiceAssistant;
+namespace VoiceAssistant.UI;
 
 /// <summary>
 /// Blank-canvas voice assistant window.
@@ -40,9 +46,6 @@ public sealed class MainForm : Form
     private static readonly Color BorderLine  = Color.FromArgb(35, 45, 65);
     private static readonly Color TextDefault = Color.FromArgb(226, 232, 240);
     private static readonly Color MutedColor  = Color.FromArgb(100, 116, 139);
-    private static readonly Color UserColor   = Color.FromArgb(165, 180, 252);   // lilac
-    private static readonly Color AssistColor = Color.FromArgb(134, 239, 172);   // green
-    private static readonly Color SystemColor = Color.FromArgb(100, 116, 139);   // grey
     private static readonly Color ToolColor   = Color.FromArgb(251, 191,  36);   // amber
     private static readonly Color CopilotPink = Color.FromArgb(226, 178, 255);   // Copilot header pink
 
@@ -50,23 +53,15 @@ public sealed class MainForm : Form
     private readonly AppSettings    _cfg         = AppSettings.Load();
     private UserSettings            _settings;
     private readonly TokenProvider  _tokens;
-    private readonly VoiceOutput    _tts         = new();
+    private readonly CopilotCliTool _copilotCli;
+    private readonly VoiceOutput    _voiceOutputQueue = new();
+    private readonly PttController  _pttController = new();
     private TokenRefreshService?    _tokenRefresh;
     private RealtimeClient?         _client;
-    private bool                    _connected;
-    private bool                    _pttHeld;    // tracks spacebar/button hold state
+    private ChatRenderer?           _chatRenderer;
+    private bool                    _isConnected;
     private EmbeddedTerminal?       _terminal;   // embedded Copilot CLI terminal
     private NarrationServer?        _narration;  // local WebSocket server for CLI narration
-
-    // Delta accumulation: Realtime API sends text in tiny chunks; we buffer
-    // them and render only on the final `done` event.
-    private string _deltaBuffer = "";
-
-    // Thinking spinner state
-    private System.Windows.Forms.Timer? _spinnerTimer;
-    private int _spinnerFrame;
-    private bool _spinnerActive;
-    private static readonly string[] SpinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
     // ── Controls ─────────────────────────────────────────────────────────────
     private RichTextBox   _chat         = null!;
@@ -80,19 +75,29 @@ public sealed class MainForm : Form
     private Label         _pttLabel     = null!;   // "Hold to talk  /  Space"
     private Panel         _termPanel    = null!;   // hosts the embedded terminal
     private SplitContainer _splitter    = null!;   // terminal (top) / chat (bottom)
+    private readonly ToolTip _tooltip   = new();   // single reusable instance — avoids GDI handle leak
 
     // Drag state for borderless window
-    private bool _dragging;
+    private bool _isDragging;
     private Point _dragStart;
 
     // ── Constructors ──────────────────────────────────────────────────────────
 
-    public MainForm(UserSettings settings, TokenProvider tokens)
+    public MainForm(UserSettings settings, TokenProvider tokens, CopilotCliTool copilotCli)
     {
-        _settings = settings;
-        _tokens   = tokens;
+        _settings   = settings;
+        _tokens     = tokens;
+        _copilotCli = copilotCli;
         BuildUI();
         SubscribeToBus();
+    }
+
+    // ── UI thread helper ───────────────────────────────────────────────────────
+
+    private void RunOnUI(Action action)
+    {
+        if (InvokeRequired) Invoke(action);
+        else action();
     }
 
     // ── UI construction ───────────────────────────────────────────────────────
@@ -147,13 +152,12 @@ public sealed class MainForm : Form
         _micBtn.FlatAppearance.BorderSize = 0;
         _micBtn.FlatAppearance.MouseOverBackColor = Color.Transparent;
         _micBtn.Click += OnMicClick;
-        ToolTip micTip = new();
-        micTip.SetToolTip(_micBtn, "Click to connect / disconnect mic");
+        _tooltip.SetToolTip(_micBtn, "Click to connect / disconnect mic");
 
-        _settingsBtn = MakeTitleButton("⚙", "Settings");
+        _settingsBtn = MakeTitleButton("⚙", "Settings", _tooltip);
         _settingsBtn.Click += (_, _) => ShowSetup();
 
-        _closeBtn = MakeTitleButton("✕", "Close");
+        _closeBtn = MakeTitleButton("✕", "Close", _tooltip);
         _closeBtn.ForeColor = Color.FromArgb(239, 68, 68);
         _closeBtn.Click += (_, _) => Close();
 
@@ -161,10 +165,10 @@ public sealed class MainForm : Form
 
         _titleBar.MouseDown += OnTitleBarMouseDown;
         _titleBar.MouseMove += OnTitleBarMouseMove;
-        _titleBar.MouseUp   += (_, _) => _dragging = false;
+        _titleBar.MouseUp   += (_, _) => _isDragging = false;
         _titleLabel.MouseDown += OnTitleBarMouseDown;
         _titleLabel.MouseMove += OnTitleBarMouseMove;
-        _titleLabel.MouseUp   += (_, _) => _dragging = false;
+        _titleLabel.MouseUp   += (_, _) => _isDragging = false;
 
         _titleBar.Resize += (_, _) => LayoutTitleButtons();
         _titleBar.ClientSizeChanged += (_, _) => LayoutTitleButtons();
@@ -182,6 +186,7 @@ public sealed class MainForm : Form
             Padding     = new Padding(16, 10, 16, 10),
             WordWrap    = true,
         };
+        _chatRenderer = new ChatRenderer(_chat);
 
         // ── Setup overlay (child — rendered on top of chat) ───────────────────
         _overlay = new SetupOverlay(_tokens) { Visible = false };
@@ -232,6 +237,26 @@ public sealed class MainForm : Form
         // PTT button mouse events
         _pttBtn.MouseDown += (_, e) => { if (e.Button == MouseButtons.Left) PttPress(); };
         _pttBtn.MouseUp   += (_, e) => { if (e.Button == MouseButtons.Left) PttRelease(); };
+
+        // Wire PttController events to RealtimeClient
+        _pttController.PttStarted += () =>
+        {
+            _client?.StartPtt();
+            _pttBtn.BackColor = Color.FromArgb(220, 38, 38);   // red = hot
+            _pttBtn.Text      = "\ud83d\udd34";
+            MakeRound(_pttBtn);
+            _pttLabel.Text = "Listening\u2026  release to send";
+            _voiceOutputQueue.SetSuppressed(true);
+        };
+        _pttController.PttEnded += () =>
+        {
+            _client?.StopPtt();
+            _pttBtn.BackColor = Color.FromArgb(201, 60, 158);   // back to pink
+            _pttBtn.Text      = "\ud83c\udf99";
+            MakeRound(_pttBtn);
+            _pttLabel.Text = "Hold to talk  \u00b7  Space";
+            _voiceOutputQueue.SetSuppressed(false);
+        };
 
         // ── Terminal panel (hosts embedded Copilot CLI conhost window) ──────────
         _termPanel = new Panel
@@ -294,8 +319,18 @@ public sealed class MainForm : Form
 
         // Spacebar PTT — must set KeyPreview so form receives key events before controls
         KeyPreview = true;
-        KeyDown += OnKeyDown;
-        KeyUp   += OnKeyUp;
+        KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Space)
+            {
+                e.SuppressKeyPress = true;
+                PttPress();
+            }
+        };
+        KeyUp += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Space) PttRelease();
+        };
 
         ResumeLayout(false);
 
@@ -344,34 +379,31 @@ public sealed class MainForm : Form
         try
         {
             var workingDir = CopilotCliTool.GetProjectRoot();
-            var sessionId = CopilotCliTool.ResumeSessionId;
+            var sessionId = _copilotCli.ResumeSessionId;
 
             _terminal = new EmbeddedTerminal();
             await _terminal.StartAsync(_termPanel, workingDir, sessionId);
 
             // Wire terminal reference so voice commands are typed into the terminal
-            CopilotCliTool.Terminal = _terminal;
+            _copilotCli.Terminal = _terminal;
 
-            // Wire up voice command delegates — display in chat panel
-            CopilotCliTool.OnCommandStarted = async (command) =>
+            // Wire up voice command events — display in chat panel
+            _copilotCli.OnCommandStarted += (command) =>
             {
-                if (InvokeRequired) { Invoke(() => OnVoiceCommandStarted(command)); }
-                else OnVoiceCommandStarted(command);
-                await Task.CompletedTask;
+                RunOnUI(() => OnVoiceCommandStarted(command));
+                return Task.CompletedTask;
             };
 
-            CopilotCliTool.OnDelta = async (delta) =>
+            _copilotCli.OnDelta += (delta) =>
             {
-                if (InvokeRequired) { Invoke(() => OnVoiceDelta(delta)); }
-                else OnVoiceDelta(delta);
-                await Task.CompletedTask;
+                RunOnUI(() => OnVoiceDelta(delta));
+                return Task.CompletedTask;
             };
 
-            CopilotCliTool.OnCommandCompleted = async (result) =>
+            _copilotCli.OnCommandCompleted += (result) =>
             {
-                if (InvokeRequired) { Invoke(() => OnVoiceCommandCompleted(result)); }
-                else OnVoiceCommandCompleted(result);
-                await Task.CompletedTask;
+                RunOnUI(() => OnVoiceCommandCompleted(result));
+                return Task.CompletedTask;
             };
 
             UIMessageBus.PushSystem("Terminal loaded — Copilot CLI is running above.", readAloud: false);
@@ -379,120 +411,25 @@ public sealed class MainForm : Form
         catch (Exception ex)
         {
             AppLog.Error($"Failed to start terminal: {ex.Message}");
-            UIMessageBus.PushSystem($"⚠ Terminal failed: {ex.Message}", readAloud: false);
+            UIMessageBus.PushSystem($"\u26a0 Terminal failed: {ex.Message}", readAloud: false);
         }
     }
 
-    // ── Voice command display in chat panel ───────────────────────────────────
+    // ── Voice command display (delegated to ChatRenderer) ─────────────────────
 
     private void OnVoiceCommandStarted(string command)
     {
-        // Stop any existing spinner
-        StopSpinner();
-
-        // Start thinking spinner
-        _spinnerFrame = 0;
-        _spinnerActive = true;
-
-        _chat.SelectionStart  = _chat.TextLength;
-        _chat.SelectionLength = 0;
-        _chat.SelectionColor  = ToolColor;
-        _chat.AppendText($"\n  {SpinnerFrames[0]} Thinking…");
-        _chat.SelectionStart = _chat.TextLength;
-        _chat.ScrollToCaret();
-
-        _spinnerTimer ??= new System.Windows.Forms.Timer { Interval = 80 };
-        _spinnerTimer.Tick -= OnSpinnerTick;
-        _spinnerTimer.Tick += OnSpinnerTick;
-        _spinnerTimer.Start();
-    }
-
-    private void OnSpinnerTick(object? sender, EventArgs e)
-    {
-        if (!_spinnerActive) return;
-        _spinnerFrame = (_spinnerFrame + 1) % SpinnerFrames.Length;
-
-        // Replace the spinner character in the last line
-        var text = _chat.Text;
-        var lastNewline = text.LastIndexOf('\n');
-        if (lastNewline >= 0)
-        {
-            var lineStart = lastNewline + 1;
-            _chat.Select(lineStart, _chat.TextLength - lineStart);
-            _chat.SelectionColor = ToolColor;
-            _chat.SelectedText = $"  {SpinnerFrames[_spinnerFrame]} Thinking…";
-            _chat.SelectionStart = _chat.TextLength;
-        }
+        _chatRenderer?.StartThinking();
     }
 
     private void OnVoiceDelta(string delta)
     {
-        // First delta — stop spinner, clear spinner line, start response
-        if (_spinnerActive)
-        {
-            StopSpinner();
-
-            // Clear the spinner line
-            var text = _chat.Text;
-            var lastNewline = text.LastIndexOf('\n');
-            if (lastNewline >= 0)
-            {
-                _chat.Select(lastNewline, _chat.TextLength - lastNewline);
-                _chat.SelectedText = "\n";
-            }
-
-            // Start response header
-            _chat.SelectionStart  = _chat.TextLength;
-            _chat.SelectionLength = 0;
-            _chat.SelectionColor  = SystemColor;
-            _chat.AppendText($"{DateTime.Now:HH:mm}  ");
-            _chat.SelectionColor  = AssistColor;
-            _chat.AppendText("Copilot   ");
-            _chat.SelectionColor  = TextDefault;
-        }
-
-        // Append delta text
-        if (!string.IsNullOrEmpty(delta))
-        {
-            _chat.SelectionStart  = _chat.TextLength;
-            _chat.SelectionLength = 0;
-            _chat.SelectionColor  = TextDefault;
-            _chat.AppendText(delta);
-            _chat.SelectionStart = _chat.TextLength;
-            _chat.ScrollToCaret();
-        }
-    }
-
-    private void StopSpinner()
-    {
-        _spinnerActive = false;
-        _spinnerTimer?.Stop();
+        _chatRenderer?.HandleVoiceDelta(delta);
     }
 
     private void OnVoiceCommandCompleted(string result)
     {
-        if (!_spinnerActive) return;
-
-        StopSpinner();
-
-        // Clear the spinner line
-        var text = _chat.Text;
-        var lastNewline = text.LastIndexOf('\n');
-        if (lastNewline >= 0)
-        {
-            _chat.Select(lastNewline, _chat.TextLength - lastNewline);
-            _chat.SelectedText = "\n";
-        }
-
-        // Show a brief "sent" confirmation
-        _chat.SelectionStart  = _chat.TextLength;
-        _chat.SelectionLength = 0;
-        _chat.SelectionColor  = SystemColor;
-        _chat.AppendText($"{DateTime.Now:HH:mm}  ");
-        _chat.SelectionColor  = ToolColor;
-        _chat.AppendText("→ Sent to terminal\n");
-        _chat.SelectionStart = _chat.TextLength;
-        _chat.ScrollToCaret();
+        _chatRenderer?.HandleVoiceCommandCompleted();
     }
 
     // ── Push subscription ─────────────────────────────────────────────────────
@@ -507,58 +444,12 @@ public sealed class MainForm : Form
         // Always marshal to UI thread regardless of caller thread.
         if (InvokeRequired) { Invoke(() => OnMessagePushed(msg)); return; }
 
-        AppendMessage(msg);
+        _chatRenderer?.AppendMessage(msg);
 
         // TTS readback for non-Realtime messages (system / tool / injected text).
         // The Realtime API handles assistant voice itself; suppress TTS then.
         if (msg.ReadAloud && msg.Role != MessageRole.User)
-            _tts.Enqueue(msg.Text);
-    }
-
-    // ── Chat rendering ────────────────────────────────────────────────────────
-
-    private void AppendMessage(UIMessage msg)
-    {
-        if (msg.Role == MessageRole.Assistant && _deltaBuffer.Length > 0)
-        {
-            // Flush any outstanding delta for this turn before writing the final
-            _deltaBuffer = "";
-        }
-
-        var (prefix, color) = msg.Role switch
-        {
-            MessageRole.User      => ("You      ", UserColor),
-            MessageRole.Assistant => ("Assistant", AssistColor),
-            MessageRole.Tool      => ("Tool     ", ToolColor),
-            _                     => ("System   ", SystemColor),
-        };
-
-        _chat.SelectionStart  = _chat.TextLength;
-        _chat.SelectionLength = 0;
-
-        // Timestamp + role
-        _chat.SelectionColor = SystemColor;
-        _chat.AppendText($"\n{msg.At:HH:mm}  ");
-        _chat.SelectionColor = color;
-        _chat.SelectionFont  = new Font(_chat.Font, FontStyle.Regular);
-        _chat.AppendText($"{prefix}  ");
-        _chat.SelectionColor = TextDefault;
-        _chat.AppendText(msg.Text + "\n");
-
-        _chat.SelectionStart = _chat.TextLength;
-        _chat.ScrollToCaret();
-    }
-
-    // Append a delta chunk inline (no newline, no timestamp) — used for streaming
-    private void AppendDelta(string delta)
-    {
-        if (string.IsNullOrEmpty(delta)) return;
-        _chat.SelectionStart  = _chat.TextLength;
-        _chat.SelectionLength = 0;
-        _chat.SelectionColor  = AssistColor;
-        _chat.AppendText(delta);
-        _chat.SelectionStart = _chat.TextLength;
-        _chat.ScrollToCaret();
+            _voiceOutputQueue.Enqueue(msg.Text);
     }
 
     // ── Connection ────────────────────────────────────────────────────────────
@@ -569,10 +460,11 @@ public sealed class MainForm : Form
         UIMessageBus.PushSystem($"Connecting… (log: {AppLog.LogFilePath})", readAloud: false);
         try
         {
-            _client = new RealtimeClient(_cfg, _settings, _tokens);
+            _client = new RealtimeClient(_cfg, _settings, _tokens,
+                new ToolRegistry(_copilotCli, _terminal));
             _client.StatusChanged += OnClientStatusChanged;
             await _client.ConnectAsync();
-            _connected = true;
+            _isConnected = true;
             SetMicState(connected: true);
             UIMessageBus.PushSystem("Connected — speak to start.", readAloud: false);
 
@@ -601,14 +493,14 @@ public sealed class MainForm : Form
         await _client.DisconnectAsync();
         await _client.DisposeAsync();
         _client    = null;
-        _connected = false;
+        _isConnected = false;
         SetMicState(connected: false);
         UIMessageBus.PushSystem("Disconnected.", readAloud: false);
     }
 
     private async void OnMicClick(object? sender, EventArgs e)
     {
-        if (_connected) await DisconnectAsync();
+        if (_isConnected) await DisconnectAsync();
         else            await ConnectAsync();
     }
 
@@ -618,15 +510,15 @@ public sealed class MainForm : Form
     /// </summary>
     private void OnClientStatusChanged(object? sender, StatusEventArgs e)
     {
-        if (InvokeRequired) { BeginInvoke(() => OnClientStatusChanged(sender, e)); return; }
-
-        if (e.State == ClientState.Idle && _connected)
+        RunOnUI(() =>
         {
-            // Server disconnected us (idle timeout, etc.)
-            _connected = false;
-            StopSpinner();
-            SetMicState(connected: false);
-        }
+            if (e.State == ClientState.Idle && _isConnected)
+            {
+                _isConnected = false;
+                _chatRenderer?.StopThinking();
+                SetMicState(connected: false);
+            }
+        });
     }
 
     // ── Settings overlay ──────────────────────────────────────────────────────
@@ -647,9 +539,11 @@ public sealed class MainForm : Form
 
     private void OnTokenExpiring(object? sender, int minutesRemaining)
     {
-        if (InvokeRequired) { BeginInvoke(() => OnTokenExpiring(sender, minutesRemaining)); return; }
-        if (minutesRemaining <= 2)
-            UIMessageBus.PushSystem($"⚠ Token expires in {minutesRemaining} min — refreshing…", readAloud: false);
+        RunOnUI(() =>
+        {
+            if (minutesRemaining <= 2)
+                UIMessageBus.PushSystem($"⚠ Token expires in {minutesRemaining} min — refreshing…", readAloud: false);
+        });
     }
 
     private async void OnTokenRefreshed(object? sender, string newToken)
@@ -663,8 +557,7 @@ public sealed class MainForm : Form
 
     private void OnTokenRefreshFailed(object? sender, string error)
     {
-        if (InvokeRequired) { BeginInvoke(() => OnTokenRefreshFailed(sender, error)); return; }
-        UIMessageBus.PushSystem($"⚠ Token refresh failed: {error}. Click mic to re-sign in.", readAloud: true);
+        RunOnUI(() => UIMessageBus.PushSystem($"⚠ Token refresh failed: {error}. Click mic to re-sign in.", readAloud: true));
     }
 
     // ── UI state helpers ──────────────────────────────────────────────────────
@@ -685,7 +578,7 @@ public sealed class MainForm : Form
             _pttBtn.Enabled    = true;
             _pttBtn.BackColor  = Color.FromArgb(201, 60, 158);   // pink ready
             MakeRound(_pttBtn);
-            _tts.SetSuppressed(false);
+            _voiceOutputQueue.SetSuppressed(false);
         }
         else
         {
@@ -697,54 +590,18 @@ public sealed class MainForm : Form
         }
 
         // Update tooltip
-        var tip = new ToolTip();
-        tip.SetToolTip(_micBtn, connected ? "Connected — click to disconnect"
-                                          : "Disconnected — click to connect");
+        _tooltip.SetToolTip(_micBtn, connected ? "Connected — click to disconnect"
+                                               : "Disconnected — click to connect");
     }
 
-    // ── Push-to-talk ──────────────────────────────────────────────────────────
+    // ── Push-to-talk (delegated to PttController) ──────────────────────────────
 
-    private void PttPress()
-    {
-        if (!_connected || _pttHeld) return;
-        _pttHeld = true;
-        _client?.StartPtt();
-        _pttBtn.BackColor = Color.FromArgb(220, 38, 38);   // red = hot
-        _pttBtn.Text      = "🔴";
-        MakeRound(_pttBtn);
-        _pttLabel.Text = "Listening…  release to send";
-        _tts.SetSuppressed(true);    // don't let TTS interrupt while user is speaking
-    }
-
-    private void PttRelease()
-    {
-        if (!_pttHeld) return;
-        _pttHeld = false;
-        _client?.StopPtt();
-        _pttBtn.BackColor = Color.FromArgb(201, 60, 158);   // back to pink
-        _pttBtn.Text      = "🎙";
-        MakeRound(_pttBtn);
-        _pttLabel.Text = "Hold to talk  ·  Space";
-        _tts.SetSuppressed(false);
-    }
-
-    // ── Keyboard PTT (spacebar) ───────────────────────────────────────────────
-
-    private void OnKeyDown(object? sender, KeyEventArgs e)
-    {
-        if (e.KeyCode != Keys.Space) return;
-        e.SuppressKeyPress = true;   // don't type a space into the chat
-        PttPress();
-    }
-
-    private void OnKeyUp(object? sender, KeyEventArgs e)
-    {
-        if (e.KeyCode == Keys.Space) PttRelease();
-    }
+    private void PttPress()  => _pttController.Press(_isConnected);
+    private void PttRelease() => _pttController.Release();
 
     // ── Title bar helpers ─────────────────────────────────────────────────────
 
-    private static Button MakeTitleButton(string text, string tip)
+    private static Button MakeTitleButton(string text, string tip, ToolTip tooltip)
     {
         var btn = new Button
         {
@@ -758,7 +615,7 @@ public sealed class MainForm : Form
         };
         btn.FlatAppearance.BorderSize        = 0;
         btn.FlatAppearance.MouseOverBackColor = Color.FromArgb(40, 50, 70);
-        new ToolTip().SetToolTip(btn, tip);
+        tooltip.SetToolTip(btn, tip);
         return btn;
     }
 
@@ -822,7 +679,7 @@ public sealed class MainForm : Form
     private void OnTitleBarMouseDown(object? sender, MouseEventArgs e)
     {
         if (e.Button != MouseButtons.Left) return;
-        _dragging  = true;
+        _isDragging  = true;
         _dragStart = e.Location;
         if (sender is Control c) _dragStart = c.PointToScreen(e.Location);
         _dragStart = new Point(_dragStart.X - Left, _dragStart.Y - Top);
@@ -830,7 +687,7 @@ public sealed class MainForm : Form
 
     private void OnTitleBarMouseMove(object? sender, MouseEventArgs e)
     {
-        if (!_dragging) return;
+        if (!_isDragging) return;
         var screen = (sender is Control c) ? c.PointToScreen(e.Location) : Cursor.Position;
         Location = new Point(screen.X - _dragStart.X, screen.Y - _dragStart.Y);
     }
@@ -842,10 +699,17 @@ public sealed class MainForm : Form
         UIMessageBus.MessagePushed -= OnMessagePushed;
 
         // Clean up embedded terminal process
-        StopSpinner();
-        _spinnerTimer?.Dispose();
+        _chatRenderer?.Dispose();
         _terminal?.Dispose();
         _terminal = null;
+
+        // Stop and dispose token refresh monitor
+        _tokenRefresh?.Stop();
+        _tokenRefresh?.Dispose();
+        _tokenRefresh = null;
+
+        // Dispose shared ToolTip
+        _tooltip.Dispose();
 
         // Clean up narration server
         if (_narration != null)
@@ -858,12 +722,12 @@ public sealed class MainForm : Form
         {
             e.Cancel = true;
             await DisconnectAsync();
-            await _tts.DisposeAsync();
+            await _voiceOutputQueue.DisposeAsync();
             Close();
         }
         else
         {
-            await _tts.DisposeAsync();
+            await _voiceOutputQueue.DisposeAsync();
         }
     }
 }

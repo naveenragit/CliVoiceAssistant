@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace VoiceAssistant;
+namespace VoiceAssistant.Infrastructure;
 
 /// <summary>
 /// Persistent key-value memory store shared between Copilot CLI sessions and

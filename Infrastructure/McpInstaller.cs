@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
-namespace VoiceAssistant;
+namespace VoiceAssistant.Infrastructure;
 
 /// <summary>
 /// On startup, registers the Voice Assistant's MCP server (narrate + memory tools)

@@ -1,7 +1,7 @@
 using System.Speech.Synthesis;
 using System.Threading.Channels;
 
-namespace VoiceAssistant;
+namespace VoiceAssistant.Audio;
 
 /// <summary>
 /// Queue-based TTS using the Windows built-in speech engine
@@ -17,8 +17,8 @@ public sealed class VoiceOutput : IAsyncDisposable
 {
     private readonly SpeechSynthesizer              _synth;
     private readonly Channel<string>                _queue;
-    private readonly CancellationTokenSource        _cts = new();
-    private volatile bool                           _suppressed;
+    private readonly CancellationTokenSource        _cancellationTokenSource = new();
+    private volatile bool                           _isSuppressed;
 
     public VoiceOutput()
     {
@@ -30,7 +30,7 @@ public sealed class VoiceOutput : IAsyncDisposable
         _queue = Channel.CreateUnbounded<string>(
             new UnboundedChannelOptions { SingleReader = true });
 
-        _ = Task.Run(DrainLoopAsync, _cts.Token);
+        _ = Task.Run(DrainLoopAsync, _cancellationTokenSource.Token);
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -49,7 +49,7 @@ public sealed class VoiceOutput : IAsyncDisposable
     /// While <paramref name="suppress"/> is <c>true</c>, queued items are
     /// silently discarded so they don't collide with model audio output.
     /// </summary>
-    public void SetSuppressed(bool suppress) => _suppressed = suppress;
+    public void SetSuppressed(bool suppress) => _isSuppressed = suppress;
 
     /// <summary>Interrupts current speech and clears the queue.</summary>
     public void Clear()
@@ -62,27 +62,27 @@ public sealed class VoiceOutput : IAsyncDisposable
 
     private async Task DrainLoopAsync()
     {
-        await foreach (var text in _queue.Reader.ReadAllAsync(_cts.Token))
+        await foreach (var text in _queue.Reader.ReadAllAsync(_cancellationTokenSource.Token))
         {
-            if (_suppressed) continue;                  // skip while model is speaking
-            if (_cts.Token.IsCancellationRequested) break;
+            if (_isSuppressed) continue;                  // skip while model is speaking
+            if (_cancellationTokenSource.Token.IsCancellationRequested) break;
 
             await Task.Run(() =>
             {
                 try { _synth.Speak(text); }             // blocking synchronous call
                 catch (OperationCanceledException) { }
                 catch { /* audio device errors — ignore */ }
-            }, _cts.Token);
+            }, _cancellationTokenSource.Token);
         }
     }
 
     public async ValueTask DisposeAsync()
     {
         _queue.Writer.Complete();
-        _cts.Cancel();
+        _cancellationTokenSource.Cancel();
         _synth.SpeakAsyncCancelAll();
         await Task.Delay(100);      // let the drain loop exit cleanly
         _synth.Dispose();
-        _cts.Dispose();
+        _cancellationTokenSource.Dispose();
     }
 }

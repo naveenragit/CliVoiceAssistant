@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 
-namespace VoiceAssistant;
+namespace VoiceAssistant.Infrastructure;
 
 /// <summary>
 /// Launches copilot.exe directly inside a conhost terminal window and embeds
@@ -197,12 +197,12 @@ public sealed class EmbeddedTerminal : IDisposable
     /// Inject text into the embedded terminal as keystrokes, optionally pressing Enter.
     /// Used by the voice assistant to type voice commands directly into Copilot CLI.
     /// </summary>
-    public async Task SendTextAsync(string text, bool pressEnter = true)
+    public async Task SendTextAsync(string text, bool submitWithEnter = true)
     {
         if (_terminalHwnd == IntPtr.Zero)
             throw new InvalidOperationException("Terminal window not available");
 
-        AppLog.Info($"EmbeddedTerminal: injecting {text.Length} chars, enter={pressEnter}");
+        AppLog.Info($"EmbeddedTerminal: injecting {text.Length} chars, enter={submitWithEnter}");
 
         // Focus the terminal first
         Focus();
@@ -215,7 +215,7 @@ public sealed class EmbeddedTerminal : IDisposable
             await Task.Delay(5); // small delay for reliability
         }
 
-        if (pressEnter)
+        if (submitWithEnter)
         {
             await Task.Delay(50);
             PostMessage(_terminalHwnd, WM_KEYDOWN, (IntPtr)VK_RETURN, IntPtr.Zero);

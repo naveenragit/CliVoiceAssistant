@@ -1,6 +1,6 @@
 using Windows.Security.Credentials;
 
-namespace VoiceAssistant;
+namespace VoiceAssistant.Auth;
 
 /// <summary>
 /// Stores and retrieves secrets using the Windows Credential Manager

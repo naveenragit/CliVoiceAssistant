@@ -1,4 +1,4 @@
-namespace VoiceAssistant;
+namespace VoiceAssistant.Infrastructure;
 
 /// <summary>
 /// Simple append-only log file at %APPDATA%\VoiceAssistant\app.log.
@@ -13,14 +13,20 @@ public static class AppLog
 
     private static readonly object _lock = new();
 
+    private const long MaxLogSizeBytes = 200_000;
+    private static readonly string BackupLogPath = LogPath + ".1";
+
     static AppLog()
     {
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(LogPath)!);
-            // Rotate: keep last 200 KB
-            if (File.Exists(LogPath) && new FileInfo(LogPath).Length > 200_000)
+            // Rolling rotation: when log exceeds 200 KB, archive as app.log.1 and start fresh.
+            if (File.Exists(LogPath) && new FileInfo(LogPath).Length > MaxLogSizeBytes)
+            {
+                File.Copy(LogPath, BackupLogPath, overwrite: true);
                 File.Delete(LogPath);
+            }
             File.AppendAllText(LogPath,
                 $"\n──── Session started {DateTime.Now:yyyy-MM-dd HH:mm:ss} ────\n");
         }

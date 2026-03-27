@@ -1,4 +1,4 @@
-namespace VoiceAssistant;
+namespace VoiceAssistant.Infrastructure;
 
 // ── Message types ─────────────────────────────────────────────────────────────
 

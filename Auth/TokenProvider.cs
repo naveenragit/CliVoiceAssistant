@@ -1,7 +1,8 @@
 using Azure.Core;
 using Azure.Identity;
+using VoiceAssistant.Infrastructure;
 
-namespace VoiceAssistant;
+namespace VoiceAssistant.Auth;
 
 /// <summary>
 /// Acquires Azure AD access tokens for Azure OpenAI / Cognitive Services.

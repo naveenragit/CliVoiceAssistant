@@ -1,8 +1,9 @@
 using System.Net;
 using System.Net.WebSockets;
 using System.Text;
+using VoiceAssistant.Infrastructure;
 
-namespace VoiceAssistant;
+namespace VoiceAssistant.Networking;
 
 /// <summary>
 /// Local WebSocket server on ws://localhost:9877 that receives narration text
@@ -12,8 +13,8 @@ public sealed class NarrationServer : IAsyncDisposable
 {
     public const int Port = 9877;
 
-    private HttpListener? _listener;
-    private CancellationTokenSource _cts = new();
+    private HttpListener? _narrationHttpListener;
+    private CancellationTokenSource _cancellationTokenSource = new();
     private readonly Func<string, Task>? _speakAsync;
 
     /// <param name="speakAsync">Async callback to speak narration text via Realtime API.</param>
@@ -25,13 +26,13 @@ public sealed class NarrationServer : IAsyncDisposable
     /// <summary>Start listening for narration messages.</summary>
     public void Start()
     {
-        _listener = new HttpListener();
-        _listener.Prefixes.Add($"http://localhost:{Port}/");
+        _narrationHttpListener = new HttpListener();
+        _narrationHttpListener.Prefixes.Add($"http://localhost:{Port}/");
         try
         {
-            _listener.Start();
+            _narrationHttpListener.Start();
             AppLog.Info($"NarrationServer: listening on ws://localhost:{Port}");
-            _ = Task.Run(AcceptLoopAsync, _cts.Token);
+            _ = Task.Run(AcceptLoopAsync, _cancellationTokenSource.Token);
         }
         catch (Exception ex)
         {
@@ -41,32 +42,32 @@ public sealed class NarrationServer : IAsyncDisposable
 
     private async Task AcceptLoopAsync()
     {
-        while (_listener?.IsListening == true && !_cts.IsCancellationRequested)
+        while (_narrationHttpListener?.IsListening == true && !_cancellationTokenSource.IsCancellationRequested)
         {
             try
             {
-                var ctx = await _listener.GetContextAsync();
+                var httpContext = await _narrationHttpListener.GetContextAsync();
 
-                if (ctx.Request.IsWebSocketRequest)
+                if (httpContext.Request.IsWebSocketRequest)
                 {
-                    _ = Task.Run(() => HandleWebSocketAsync(ctx));
+                    _ = Task.Run(() => HandleWebSocketAsync(httpContext));
                 }
                 else
                 {
                     // Also accept plain HTTP POST for simple clients
-                    if (ctx.Request.HttpMethod == "POST")
+                    if (httpContext.Request.HttpMethod == "POST")
                     {
-                        await HandleHttpPostAsync(ctx);
+                        await HandleHttpPostAsync(httpContext);
                     }
                     else
                     {
                         // Health check / info
                         var response = Encoding.UTF8.GetBytes(
                             "{\"status\":\"ok\",\"service\":\"voice-assistant-narration\"}");
-                        ctx.Response.StatusCode = 200;
-                        ctx.Response.ContentType = "application/json";
-                        await ctx.Response.OutputStream.WriteAsync(response);
-                        ctx.Response.Close();
+                        httpContext.Response.StatusCode = 200;
+                        httpContext.Response.ContentType = "application/json";
+                        await httpContext.Response.OutputStream.WriteAsync(response);
+                        httpContext.Response.Close();
                     }
                 }
             }
@@ -79,76 +80,76 @@ public sealed class NarrationServer : IAsyncDisposable
         }
     }
 
-    private async Task HandleWebSocketAsync(HttpListenerContext ctx)
+    private async Task HandleWebSocketAsync(HttpListenerContext httpContext)
     {
-        WebSocketContext wsCtx;
+        WebSocketContext webSocketContext;
         try
         {
-            wsCtx = await ctx.AcceptWebSocketAsync(null);
+            webSocketContext = await httpContext.AcceptWebSocketAsync(null);
         }
         catch (Exception ex)
         {
             AppLog.Error($"NarrationServer: WebSocket accept failed: {ex.Message}");
-            ctx.Response.StatusCode = 500;
-            ctx.Response.Close();
+            httpContext.Response.StatusCode = 500;
+            httpContext.Response.Close();
             return;
         }
 
-        var ws = wsCtx.WebSocket;
-        var buf = new byte[8192];
+        var webSocket = webSocketContext.WebSocket;
+        var receiveBuffer = new byte[8192];
 
         try
         {
-            while (ws.State == WebSocketState.Open && !_cts.IsCancellationRequested)
+            while (webSocket.State == WebSocketState.Open && !_cancellationTokenSource.IsCancellationRequested)
             {
-                var result = await ws.ReceiveAsync(buf, _cts.Token);
+                var result = await webSocket.ReceiveAsync(receiveBuffer, _cancellationTokenSource.Token);
 
                 if (result.MessageType == WebSocketMessageType.Close)
                     break;
 
                 if (result.MessageType == WebSocketMessageType.Text)
                 {
-                    var text = Encoding.UTF8.GetString(buf, 0, result.Count);
+                    var text = Encoding.UTF8.GetString(receiveBuffer, 0, result.Count);
                     ProcessNarration(text);
 
                     // Acknowledge
-                    var ack = Encoding.UTF8.GetBytes("{\"status\":\"ok\"}");
-                    await ws.SendAsync(ack, WebSocketMessageType.Text, true, _cts.Token);
+                    var acknowledgementJson = Encoding.UTF8.GetBytes("{\"status\":\"ok\"}");
+                    await webSocket.SendAsync(acknowledgementJson, WebSocketMessageType.Text, true, _cancellationTokenSource.Token);
                 }
             }
 
-            if (ws.State == WebSocketState.Open)
-                await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+            if (webSocket.State == WebSocketState.Open)
+                await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
         }
         catch (WebSocketException) { }
         catch (OperationCanceledException) { }
         finally
         {
-            ws.Dispose();
+            webSocket.Dispose();
         }
     }
 
-    private async Task HandleHttpPostAsync(HttpListenerContext ctx)
+    private async Task HandleHttpPostAsync(HttpListenerContext httpContext)
     {
         try
         {
-            using var reader = new System.IO.StreamReader(ctx.Request.InputStream, Encoding.UTF8);
+            using var reader = new System.IO.StreamReader(httpContext.Request.InputStream, Encoding.UTF8);
             var text = await reader.ReadToEndAsync();
             ProcessNarration(text);
 
-            var ack = Encoding.UTF8.GetBytes("{\"status\":\"ok\"}");
-            ctx.Response.StatusCode = 200;
-            ctx.Response.ContentType = "application/json";
-            await ctx.Response.OutputStream.WriteAsync(ack);
+            var acknowledgementJson = Encoding.UTF8.GetBytes("{\"status\":\"ok\"}");
+            httpContext.Response.StatusCode = 200;
+            httpContext.Response.ContentType = "application/json";
+            await httpContext.Response.OutputStream.WriteAsync(acknowledgementJson);
         }
         catch (Exception ex)
         {
             AppLog.Warn($"NarrationServer: HTTP POST error: {ex.Message}");
-            ctx.Response.StatusCode = 500;
+            httpContext.Response.StatusCode = 500;
         }
         finally
         {
-            ctx.Response.Close();
+            httpContext.Response.Close();
         }
     }
 
@@ -158,8 +159,8 @@ public sealed class NarrationServer : IAsyncDisposable
 
         AppLog.Info($"NarrationServer: received narration ({text.Length} chars): {text[..Math.Min(80, text.Length)]}...");
 
-        // Show in voice chat panel
-        UIMessageBus.Push(MessageRole.Assistant, text, readAloud: false);
+        // Don't push to UI here — HandleTranscriptDone will add the message
+        // when the Realtime API speaks it, avoiding duplicates.
 
         // Speak via Realtime API (natural voice)
         if (_speakAsync != null)
@@ -174,10 +175,10 @@ public sealed class NarrationServer : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        _cts.Cancel();
-        _listener?.Stop();
-        _listener?.Close();
+        _cancellationTokenSource.Cancel();
+        _narrationHttpListener?.Stop();
+        _narrationHttpListener?.Close();
         await Task.Delay(100);
-        _cts.Dispose();
+        _cancellationTokenSource.Dispose();
     }
 }

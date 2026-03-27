@@ -15,8 +15,6 @@
   <ItemGroup>
     <!-- Audio I/O -->
     <PackageReference Include="NAudio" Version="2.2.1" />
-    <!-- JSON parsing for Realtime API events -->
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <!-- Azure AD interactive browser login -->
     <PackageReference Include="Azure.Identity" Version="1.13.2" />
     <PackageReference Include="System.Management" Version="8.0.0" />

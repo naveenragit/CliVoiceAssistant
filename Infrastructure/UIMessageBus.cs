@@ -1,4 +1,4 @@
-namespace VoiceAssistant;
+namespace VoiceAssistant.Infrastructure;
 
 /// <summary>
 /// Thread-safe static pub/sub bus.

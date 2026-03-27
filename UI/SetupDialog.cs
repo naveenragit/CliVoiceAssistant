@@ -1,4 +1,7 @@
-namespace VoiceAssistant;
+using VoiceAssistant.Auth;
+using VoiceAssistant.Config;
+
+namespace VoiceAssistant.UI;
 
 /// <summary>
 /// First-run setup dialog.

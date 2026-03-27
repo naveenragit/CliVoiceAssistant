@@ -10,17 +10,23 @@ After completing each task or answering a question, use the `narrate` MCP tool
 to send a brief spoken summary to the Voice Assistant. The Voice Assistant will
 read it aloud to the user.
 
+**IMPORTANT:** After calling `narrate`, you are DONE with that turn. Do NOT
+generate any additional text, follow-up questions, or commentary after narrating.
+The narration IS your final response. Stop immediately after the narrate tool call.
+
 ### Guidelines for narration text:
 - Keep it to **1-3 sentences** — concise and conversational
 - Use a **spoken-friendly tone** (no markdown, no code blocks, no bullet lists)
 - Summarize what you did or the answer, not the full details
 - The user can read the full details in the terminal
+- Include any follow-up question IN the narration text if needed
 
 ### Examples:
 - "Done! I created the new component file and updated the imports."
 - "The build succeeded with no errors."
 - "I found 3 files matching that pattern. The main one is in the src directory."
 - "That error is caused by a missing dependency. I've added it to package.json and installed it."
+- "You have 5 emails today. The important one is about the factory nomination. Want me to draft a reply?"
 
 ### When NOT to narrate:
 - Don't narrate if you're asking a clarifying question (the user reads those)

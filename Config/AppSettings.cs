@@ -1,6 +1,6 @@
-using Newtonsoft.Json;
+using System.Text.Json;
 
-namespace VoiceAssistant;
+namespace VoiceAssistant.Config;
 
 // ── Settings model ──────────────────────────────────────────────────────────
 
@@ -12,11 +12,16 @@ public class AppSettings
     public VoiceSettings Voice   { get; set; } = new();
     public CopilotSettings Copilot { get; set; } = new();
 
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+    };
+
     public static AppSettings Load()
     {
         var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "appsettings.json");
         if (!File.Exists(path)) return new AppSettings();
-        return JsonConvert.DeserializeObject<AppSettings>(File.ReadAllText(path)) ?? new AppSettings();
+        return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path), JsonOptions) ?? new AppSettings();
     }
 }
 

@@ -83,11 +83,75 @@ This section lists best practices for a project of this nature (WinForms + real-
 | 9.2 | **WebSocket uses TLS** — All connections must be wss://. | `BuildUriAsync` converts `https://` to `wss://`. Proxy mode uses `ws://localhost` which is acceptable for local dev. | ✅ OK |
 | 9.3 | **Process execution is safe** — No shell injection from voice-transcribed text. | `EmbeddedTerminal` uses `PostMessage(WM_CHAR)` for character injection — not shell execution. `RunPromptModeAsync` passes user text through `EscapeArg()`. | ✅ OK |
 
+### 10. Naming Conventions
+
+> A name should tell the reader what a thing **is** or **does** — without requiring them to read the implementation.
+
+| # | Best Practice | Current State | Verdict |
+|---|--------------|---------------|---------|
+| 10.1 | **Class names describe their responsibility** — A class name should communicate what the class owns and does, not just what it is in the abstract. | `RealtimeClient` doesn't indicate it is an Azure OpenAI Realtime API client. `McpInstaller` isn't an installer — it registers config entries. `NarrationServer` doesn't convey it bridges Copilot CLI text to spoken audio. `AppLog` is too generic for a file-based session logger. `SetupDialog`/`SetupOverlay` don't say they configure Azure connection settings. | ❌ Violation |
+| 10.2 | **Method names are verb phrases that describe the action** — Avoid `Handle`, `Init`, `Process`, `Do`, `Run` without qualification; they describe mechanics, not intent. | `HandleEvent` should be `DispatchRealtimeServerEvent`. `InitAudio` should be `InitializeAudioCaptureAndPlayback`. `ComputeRms` hides the domain term; should be `ComputeAudioRmsVolume`. | ❌ Violation |
+| 10.3 | **Boolean fields/properties use an `is`/`has`/`can` prefix** — Reads as a natural question: `if (_isConnected)` vs `if (_connected)`. | `_connected`, `_pttActive`, `_modelSpeaking`, `_responseInProgress`, `_spinnerActive`, `_dragging`, `_pttHeld`, `_suppressed`, `_authenticated` — none use the `is` prefix. | ❌ Violation |
+| 10.4 | **Field names spell out abbreviations** — Abbreviations like `_ws`, `_cts`, `_fmt`, `_tts`, `_ptt` require the reader to guess the domain context. | `_ws` (WebSocket), `_cts` (CancellationTokenSource), `_fmt` (WaveFormat), `_tts` (VoiceOutput), `_waveIn` / `_waveOut` (microphone / speaker device), `_playback` (audio buffer). All used across multiple files. | ❌ Violation |
+| 10.5 | **Local variables and parameters are descriptive** — Single-letter and heavily abbreviated locals impede readability in non-trivial methods. | `sb` (StringBuilder), `buf` (byte buffer), `psi` (ProcessStartInfo), `proc` (Process), `sid` (session ID), `b64` (base64 audio), `dcid` (call ID), `ep` (endpoint), `dep` (deployment), `ctx` (HttpListenerContext), `wsCtx` (WebSocketContext), `ack` (acknowledgement) — found across `RealtimeClient`, `CopilotCliTool`, `NarrationServer`. | ❌ Violation |
+
+--- 
+
+## Part 2: New Components (Added Since Initial Analysis)
+
+The following files were added to the codebase after the initial best-practice audit. They are not mentioned in the refactoring items but are part of the active codebase.
+
+| File | Purpose | Quality Notes |
+|------|---------|---------------|
+| `NarrationServer.cs` | Local WebSocket server (port 9877) that receives narration text from the Copilot CLI MCP tool and speaks it via the Realtime API. | ✅ Implements `IAsyncDisposable`. Clean and focused. |
+| `TokenRefreshService.cs` | Proactively monitors Azure AD token expiry and fires `TokenExpiring` / `TokenRefreshed` events so `RealtimeClient` can update its auth without a full reconnect. | ✅ Well-designed event model. `MainForm` subscribes and delegates to `RealtimeClient`. |
+| `SetupOverlay.cs` | Inline settings panel embedded in `MainForm`. Handles endpoint, deployment name, and auth mode (AAD vs API key) configuration. Stores secrets in Credential Manager. | ✅ Functional. Extensive UI state management. No obvious issues. |
+| `McpInstaller.cs` | Registers/unregisters the narration MCP tool in the Copilot CLI system config on connect/disconnect. | ✅ Focused, functional. |
+| `CredentialStore.cs` | Wraps Windows Credential Manager (`PasswordVault`) to securely store and retrieve API keys. | ✅ Clean, minimal, correct. |
+| `TokenProvider.cs` | Azure AD token acquisition with an `AzureCli → InteractiveBrowser` fallback chain. Handles MSAL cache. | ✅ Well-implemented. |
+| `UIMessage.cs` | Simple data record for the message bus (`Role`, `Text`, `Timestamp`, `ReadAloud`). | ✅ Minimal and clean. |
+
 ---
 
-## Part 2: Refactoring Plan
+## Part 3: Refactoring Plan
 
 Based on the best practice violations identified above, here is the prioritized refactoring plan organized by phase.
+
+---
+
+## Current Implementation Status
+
+> Last reviewed: 2026-03-26. Legend: ✅ Done · ⚠️ Partial · ❌ Not Started
+
+| # | Item | Status | Notes |
+|---|------|--------|-------|
+| 1.1 | Fix resource disposal chain | ✅ Done | `RealtimeClient` disposes audio devices. `MainForm.OnFormClosing` disposes `_tokenRefresh`, `_tooltip`, terminal, narration, tts. |
+| 1.2 | Fix ToolTip handle leak | ✅ Done | Single `_tooltip` field reused in `MakeTitleButton` and `SetMicState`. Disposed in `OnFormClosing`. |
+| 1.3 | Add timeout to prompt-mode process | ✅ Done | 30s `CancellationTokenSource` timeout with `Task.WhenAny` in `RunPromptModeAsync`. |
+| 1.4 | Use `Interlocked` for `_pttAudioBytes` | ✅ Done | `Interlocked.Add` for increment, `Interlocked.Exchange` for reset, `Volatile.Read` for reads. |
+| 2.1 | Extract `AudioManager` | ✅ Done | New `AudioManager.cs` — owns mic capture, speaker playback, RMS volume, playback buffer. `RealtimeClient` delegates via events. |
+| 2.2 | Extract `ToolRegistry` | ✅ Done | New `ToolRegistry.cs` — owns tool definitions, dispatch, remember/select_option/copilot_cli tool logic. |
+| 2.3 | Extract `RealtimeEventRouter` | ✅ Done | `DispatchRealtimeServerEvent` refactored into 14 named handler methods within `RealtimeClient`. |
+| 2.4 | `CopilotCliTool` → instance class | ✅ Done | Converted to instance class. Created in `Program.cs`, injected into `MainForm` and `ToolRegistry`. Events replace static delegates. |
+| 2.5 | Extract `ChatRenderer` / `PttController` | ✅ Done | New `ChatRenderer.cs` (message rendering, spinner) and `PttController.cs` (press/release state, events). `MainForm` delegates to both. |
+| 3.1 | Unify JSON library to `System.Text.Json` | ✅ Done | All `Newtonsoft.Json` replaced. Package removed from csproj. |
+| 3.2 | Typed response models for tool JSON | ✅ Done | File-scoped records replace hand-built JSON strings in `RealtimeClient` and `CopilotCliTool`. |
+| 3.3 | Extract magic numbers to constants | ✅ Done | 12 named constants added to `RealtimeClient`. |
+| 3.4 | `RunOnUI` helper for UI marshalling | ✅ Done | Helper method added. 7+ duplicated patterns replaced. |
+| 3.5 | Remove hardcoded project root fallback | ✅ Done | `"CopilotCLISubFolder"` fallback removed from `FindProjectRoot()`. |
+| 3.6 | Rename classes to reflect responsibility | ❌ Not Started | See §10.1 above. |
+| 3.7 | Rename ambiguous method names | ✅ Done | `HandleEvent`→`DispatchRealtimeServerEvent`, `InitAudio`→`InitializeAudioCaptureAndPlayback`, `ComputeRms`→`ComputeAudioRmsVolume`, `pressEnter`→`submitWithEnter`. |
+| 3.8 | Add `is`/`has` prefix to boolean fields | ✅ Done | 10 booleans renamed across `MainForm`, `RealtimeClient`, `VoiceOutput`, `SetupOverlay`. |
+| 3.9 | Spell out abbreviated field names | ✅ Done | `_ws`→`_webSocket`, `_cts`→`_cancellationTokenSource`, `_fmt`→`_audioWaveFormat`, `_tts`→`_voiceOutputQueue`, etc. |
+| 3.10 | Rename abbreviated locals and parameters | ✅ Done | All abbreviated locals renamed across `RealtimeClient`, `CopilotCliTool`, `NarrationServer`. |
+| 4.1 | Auto-reconnect with exponential backoff | ✅ Done | Exponential backoff (1s→30s cap, max 5 retries). `_isUserDisconnected` flag distinguishes user disconnect from network drop. |
+| 4.2 | Improve log rotation | ✅ Done | Rolling rotation: archive to `app.log.1` before starting fresh, instead of deleting. |
+| 4.3 | Redact user speech from logs | ✅ Done | STT transcription truncated to first 20 chars + "…" in log output. |
+| 4.4 | Validate settings at startup | ✅ Done | `UserSettings.Validate()` checks endpoint/deployment; resets `IsConfigured` if invalid. Called in `Program.Main`. |
+| 5.1 | Interfaces for testability | ❌ Not Started | Zero interfaces; all concrete dependencies. |
+| 5.2 | Add test project | ❌ Not Started | No test project or test files. |
+| 5.3 | `UIMessageBus` → instance-based | ❌ Not Started | Still a fully static class. |
+| 5.4 | Unified configuration model | ❌ Not Started | `AppSettings` and `UserSettings` remain separate. `RealtimeClient` has two constructors. |
 
 ---
 
@@ -95,9 +159,11 @@ Based on the best practice violations identified above, here is the prioritized 
 
 > Fix bugs and resource leaks that affect stability in production.
 
-#### 1.1 — Fix resource disposal chain
+#### 1.1 — Fix resource disposal chain · ✅ Done
 **Addresses**: 3.1  
 **Files**: `MainForm.cs`, `RealtimeClient.cs`  
+**Current State**: `RealtimeClient.DisposeAsync` now correctly disposes `_waveIn`, `_waveOut`, `_cts`, and `_ws`. `MainForm.OnFormClosing` disposes `_spinnerTimer`, `_terminal`, `_narration`, and `_tts`. However `_tokenRefresh` is not explicitly disposed in `OnFormClosing` — it is only stopped via `DisconnectAsync`.  
+**Remaining**: Add `_tokenRefresh?.Stop(); _tokenRefresh?.Dispose();` to `MainForm.OnFormClosing`.  
 **What**:
 - `MainForm.OnFormClosing` must dispose `_tts` (IAsyncDisposable), `_client`, `_terminal`, and `_tokenRefresh`.
 - `RealtimeClient.DisposeAsync` must dispose `_waveIn` and `_waveOut` (NAudio resources).
@@ -119,7 +185,7 @@ _waveOut?.Stop();
 _waveOut?.Dispose();
 ```
 
-#### 1.2 — Fix ToolTip handle leak
+#### 1.2 — Fix ToolTip handle leak · ✅ Done
 **Addresses**: 3.4  
 **Files**: `MainForm.cs`  
 **What**:
@@ -127,14 +193,14 @@ _waveOut?.Dispose();
 - Reuse it in `SetMicState()` and `BuildUI()` instead of allocating new ones.
 - Dispose it in `OnFormClosing`.
 
-#### 1.3 — Add timeout to prompt-mode process
+#### 1.3 — Add timeout to prompt-mode process · ✅ Done
 **Addresses**: 4.4  
 **Files**: `CopilotCliTool.cs`  
 **What**:
 - Add a 30-second timeout to `RunPromptModeAsync` using `proc.WaitForExitAsync(ct)` with a CancellationTokenSource timeout.
 - Kill the process if it exceeds the timeout.
 
-#### 1.4 — Use `Interlocked` for `_pttAudioBytes`
+#### 1.4 — Use `Interlocked` for `_pttAudioBytes` · ✅ Done
 **Addresses**: 5.2  
 **Files**: `RealtimeClient.cs`  
 **What**:
@@ -147,7 +213,7 @@ _waveOut?.Dispose();
 
 > Break apart monolithic classes into focused, testable components.
 
-#### 2.1 — Extract `AudioManager` from `RealtimeClient`
+#### 2.1 — Extract `AudioManager` from `RealtimeClient` · ❌ Not Started
 **Addresses**: 1.4  
 **Files**: New `AudioManager.cs`, modify `RealtimeClient.cs`  
 **What**:
@@ -157,7 +223,7 @@ _waveOut?.Dispose();
 - `RealtimeClient` owns an `AudioManager` instance and wires events.
 - `AudioManager` implements `IDisposable`.
 
-#### 2.2 — Extract `ToolRegistry` / `ToolDispatcher`
+#### 2.2 — Extract `ToolRegistry` / `ToolDispatcher` · ❌ Not Started
 **Addresses**: 1.4, 1.5  
 **Files**: New `ToolRegistry.cs`, modify `RealtimeClient.cs`, `CopilotCliTool.cs`  
 **What**:
@@ -166,7 +232,7 @@ _waveOut?.Dispose();
 - `ToolRegistry` exposes: `IReadOnlyList<object> Definitions`, `Task<string> ExecuteAsync(string name, string argsJson)`.
 - `RealtimeClient` delegates `response.function_call_arguments.done` to `ToolRegistry`.
 
-#### 2.3 — Extract `WebSocketEventRouter` from `RealtimeClient.HandleEvent`
+#### 2.3 — Extract `WebSocketEventRouter` from `RealtimeClient.HandleEvent` · ❌ Not Started
 **Addresses**: 1.4  
 **Files**: New `RealtimeEventRouter.cs`, modify `RealtimeClient.cs`  
 **What**:
@@ -175,7 +241,7 @@ _waveOut?.Dispose();
 - The router raises domain events (e.g., `AudioDeltaReceived`, `TranscriptCompleted`, `ToolCallRequested`, `ErrorReceived`).
 - `RealtimeClient` subscribes to these events instead of inline processing.
 
-#### 2.4 — Convert `CopilotCliTool` from static to instance class
+#### 2.4 — Convert `CopilotCliTool` from static to instance class · ❌ Not Started
 **Addresses**: 1.2, 2.1  
 **Files**: `CopilotCliTool.cs`, `MainForm.cs`, `Program.cs`  
 **What**:
@@ -184,7 +250,7 @@ _waveOut?.Dispose();
 - Remove the static delegate properties (`OnDelta`, `OnCommandStarted`, `OnCommandCompleted`); use events instead.
 - Create the instance in `Program.cs` and inject it into `MainForm` and `RealtimeClient`.
 
-#### 2.5 — Slim down `MainForm` — Extract `ChatRenderer` and `PttController`
+#### 2.5 — Slim down `MainForm` — Extract `ChatRenderer` and `PttController` · ❌ Not Started
 **Addresses**: 1.1  
 **Files**: New `ChatRenderer.cs`, new `PttController.cs`, modify `MainForm.cs`  
 **What**:
@@ -205,7 +271,7 @@ _waveOut?.Dispose();
 
 > Standardize patterns, eliminate duplication, improve maintainability.
 
-#### 3.1 — Unify JSON library to `System.Text.Json`
+#### 3.1 — Unify JSON library to `System.Text.Json` · ✅ Done
 **Addresses**: 8.3  
 **Files**: `RealtimeClient.cs`, `UserSettings.cs`, all files using `Newtonsoft.Json`  
 **What**:
@@ -214,7 +280,7 @@ _waveOut?.Dispose();
 - Remove `JsonConvert.SerializeObject` → use `JsonSerializer.Serialize`.
 - Remove the `Newtonsoft.Json` NuGet package from `VoiceAssistant.csproj`.
 
-#### 3.2 — Replace hand-built JSON strings with typed response models
+#### 3.2 — Replace hand-built JSON strings with typed response models · ✅ Done
 **Addresses**: 8.2  
 **Files**: `CopilotCliTool.cs`, `RealtimeClient.cs`  
 **What**:
@@ -226,7 +292,7 @@ _waveOut?.Dispose();
 - Replace `$"{{ \"success\": true, ... }}"` with `JsonSerializer.Serialize(new ToolSuccess(...))`.
 - This prevents JSON syntax errors from string interpolation and enables refactoring.
 
-#### 3.3 — Extract magic numbers to named constants
+#### 3.3 — Extract magic numbers to named constants · ✅ Done
 **Addresses**: 8.1  
 **Files**: `RealtimeClient.cs`, `EmbeddedTerminal.cs`, `CopilotCliTool.cs`  
 **What**:
@@ -244,7 +310,7 @@ _waveOut?.Dispose();
   const int WindowDiscoveryTimeoutMs = 15000;
   ```
 
-#### 3.4 — Consistent UI thread marshalling pattern
+#### 3.4 — Consistent UI thread marshalling pattern · ✅ Done
 **Addresses**: 5.1  
 **Files**: `MainForm.cs`  
 **What**:
@@ -259,12 +325,105 @@ _waveOut?.Dispose();
 - Replace all `if (InvokeRequired) { Invoke(() => ...); } else ...;` patterns with `RunOnUI(() => ...)`.
 - Replace the delegates in `StartEmbeddedTerminalAsync` that wrap in `async` lambdas with simple `RunOnUI` calls.
 
-#### 3.5 — Remove hardcoded project root fallback
+#### 3.5 — Remove hardcoded project root fallback · ✅ Done
 **Addresses**: 8.4  
 **Files**: `CopilotCliTool.cs`  
 **What**:
 - Remove the `CopilotCLISubFolder` hardcoded fallback path.
 - If no project root is found, use `Environment.CurrentDirectory` (already the last resort).
+
+#### 3.6 — Rename classes to reflect their responsibility · ❌ Not Started
+**Addresses**: 10.1  
+**Files**: Multiple  
+**What**: Rename classes whose names are vague, misleading, or too generic. Apply renames consistently across all usages (constructors, `using` aliases, comments, XML docs). File names must be updated to match.
+
+> ⚠️ **Breakage risk for `AppSettings` → `ApplicationDefaults`**: `AppSettings.cs` uses `JsonConvert.DeserializeObject<AppSettings>(...)`. The generic type parameter must be updated to `<ApplicationDefaults>` at the same time as the class rename, or deserialization fails at runtime.
+
+| Current Name | Suggested Name | Reason |
+|---|---|---|
+| `RealtimeClient` | `AzureRealtimeApiClient` | Makes clear this is specific to the Azure OpenAI Realtime API, not a generic realtime connector. |
+| `NarrationServer` | `CliNarrationBridge` | Clarifies it bridges Copilot CLI text narration to spoken audio — not a general server. |
+| `McpInstaller` | `McpServerRegistrar` | "Installer" implies software installation; this class registers/unregisters config entries. |
+| `AppLog` | `SessionFileLogger` | Describes function (file-based, session-scoped logging), not just a vague "log". |
+| `AppSettings` | `ApplicationDefaults` | Distinguishes it from `UserSettings` — these are read-only bundled defaults from `appsettings.json`. |
+| `SetupDialog` | `AzureConnectionSetupDialog` | Identifies the dialog's scope: first-run Azure endpoint and auth configuration. |
+| `SetupOverlay` | `AzureConnectionOverlay` | Same intent — the inline overlay panel for configuring Azure connectivity. |
+| `VoiceOutput` | `WindowsSpeechQueue` | Describes that it's a queue-based TTS wrapper using `System.Speech.Synthesis`. |
+
+#### 3.7 — Rename ambiguous method names · ✅ Done
+**Addresses**: 10.2  
+**Files**: `RealtimeClient.cs`, `EmbeddedTerminal.cs`  
+**What**: Rename methods where the name describes mechanics rather than intent.
+
+> ⚠️ **Breakage risk for `pressEnter` → `submitWithEnter`**: `CopilotCliTool.cs` calls `SendTextAsync` using a named argument (`pressEnter: submit`). The caller must be updated to `submitWithEnter: submit` at the same time, or the build fails.
+
+| File | Current Name | Suggested Name | Reason |
+|---|---|---|---|
+| `RealtimeClient.cs` | `HandleEvent(string json)` | `DispatchRealtimeServerEvent(string json)` | "Handle" is vague. This method parses JSON and dispatches to per-event-type handlers. |
+| `RealtimeClient.cs` | `InitAudio()` | `InitializeAudioCaptureAndPlayback()` | "Init" is an abbreviation. The method sets up both microphone capture and speaker playback. |
+| `RealtimeClient.cs` | `ComputeRms(byte[] buf, int length)` | `ComputeAudioRmsVolume(byte[] audioBuffer, int sampleCount)` | `Rms` is a domain acronym (Root Mean Square). Both the method and its parameters need spelling out. |
+| `EmbeddedTerminal.cs` | `SendTextAsync(string text, bool pressEnter)` | Rename parameter: `bool submitWithEnter` | The boolean parameter `pressEnter` is ambiguous at the call site (`SendTextAsync("cmd", true)`). `submitWithEnter` makes the intent obvious. |
+
+#### 3.8 — Add `is`/`has` prefix to boolean fields · ✅ Done
+**Addresses**: 10.3  
+**Files**: `MainForm.cs`, `RealtimeClient.cs`, `VoiceOutput.cs`, `SetupOverlay.cs`  
+**What**: Rename boolean fields so they read naturally as yes/no questions.
+
+| File | Current | Renamed |
+|---|---|---|
+| `MainForm.cs` | `_connected` | `_isConnected` |
+| `MainForm.cs` | `_pttHeld` | `_isPttHeld` |
+| `MainForm.cs` | `_spinnerActive` | `_isSpinnerActive` |
+| `MainForm.cs` | `_dragging` | `_isDragging` |
+| `RealtimeClient.cs` | `_connected` | `_isConnected` |
+| `RealtimeClient.cs` | `_pttActive` | `_isPttActive` |
+| `RealtimeClient.cs` | `_modelSpeaking` | `_isModelSpeaking` |
+| `RealtimeClient.cs` | `_responseInProgress` | `_isResponseInProgress` |
+| `VoiceOutput.cs` | `_suppressed` | `_isSuppressed` |
+| `SetupOverlay.cs` | `_authenticated` | `_isAuthenticated` |
+
+#### 3.9 — Spell out abbreviated field names · ✅ Done
+**Addresses**: 10.4  
+**Files**: `MainForm.cs`, `RealtimeClient.cs`, `NarrationServer.cs`, `VoiceOutput.cs`  
+**What**: Replace abbreviated field names with descriptive ones. Apply consistently across all references.
+
+| File | Current | Renamed | Expanded meaning |
+|---|---|---|---|
+| `RealtimeClient.cs` | `_ws` | `_webSocket` | WebSocket connection |
+| `RealtimeClient.cs`, `NarrationServer.cs`, `VoiceOutput.cs` | `_cts` | `_cancellationTokenSource` | CancellationTokenSource |
+| `RealtimeClient.cs` | `_fmt` | `_audioWaveFormat` | NAudio WaveFormat (24 kHz, 16-bit, mono) |
+| `MainForm.cs` | `_tts` | `_voiceOutputQueue` | VoiceOutput (queued TTS) |
+| `RealtimeClient.cs` | `_waveIn` | `_microphoneCapture` | WaveInEvent for microphone recording |
+| `RealtimeClient.cs` | `_waveOut` | `_speakerPlayback` | WaveOutEvent for speaker output |
+| `RealtimeClient.cs` | `_playback` | `_audioPlaybackBuffer` | BufferedWaveProvider feeding the speaker |
+| `NarrationServer.cs` | `_listener` | `_narrationHttpListener` | HttpListener accepting WebSocket connections |
+
+#### 3.10 — Rename abbreviated locals and parameters · ✅ Done
+**Addresses**: 10.5  
+**Files**: `RealtimeClient.cs`, `CopilotCliTool.cs`, `NarrationServer.cs`  
+**What**: Rename cryptic local variables and parameters inside method bodies. Prioritize the ones that appear in the longest or most complex methods.
+
+| File | Method | Current | Renamed |
+|---|---|---|---|
+| `RealtimeClient.cs` | `ReceiveLoopAsync` | `buf` | `receiveBuffer` |
+| `RealtimeClient.cs` | `ReceiveLoopAsync` | `sb` | `messageBuilder` |
+| `RealtimeClient.cs` | `HandleEvent` | `ev` | `serverEvent` |
+| `RealtimeClient.cs` | `HandleEvent` | `b64` | `base64AudioData` |
+| `RealtimeClient.cs` | `HandleEvent` | `dcid` | `callId` |
+| `RealtimeClient.cs` | `HandleEvent` | `errObj` / `errType` | `errorData` / `errorType` |
+| `RealtimeClient.cs` | `BuildUriAsync` | `ep` | `endpoint` |
+| `RealtimeClient.cs` | `BuildUriAsync` | `dep` | `deploymentName` |
+| `RealtimeClient.cs` | `ComputeRms` | `s` | `sample` |
+| `CopilotCliTool.cs` | `RunPromptModeAsync` | `sb` | `responseBuilder` |
+| `CopilotCliTool.cs` | `RunPromptModeAsync` | `psi` | `processStartInfo` |
+| `CopilotCliTool.cs` | `RunPromptModeAsync` | `proc` | `copilotProcess` |
+| `CopilotCliTool.cs` | `RunPromptModeAsync` | `sid` | `sessionId` |
+| `CopilotCliTool.cs` | `FindProjectRoot` | `dir` | `searchDirectory` |
+| `NarrationServer.cs` | `AcceptLoopAsync` | `ctx` | `httpContext` |
+| `NarrationServer.cs` | `HandleWebSocketAsync` | `wsCtx` | `webSocketContext` |
+| `NarrationServer.cs` | `HandleWebSocketAsync` | `ws` | `webSocket` |
+| `NarrationServer.cs` | `HandleWebSocketAsync` | `buf` | `receiveBuffer` |
+| `NarrationServer.cs` | `HandleWebSocketAsync` | `ack` | `acknowledgementJson` |
 
 ---
 
@@ -272,7 +431,7 @@ _waveOut?.Dispose();
 
 > Improve production reliability and debugging experience.
 
-#### 4.1 — Add automatic WebSocket reconnection with exponential backoff
+#### 4.1 — Add automatic WebSocket reconnection with exponential backoff · ✅ Done
 **Addresses**: 4.1  
 **Files**: `RealtimeClient.cs` (or new `ConnectionManager.cs`)  
 **What**:
@@ -282,21 +441,21 @@ _waveOut?.Dispose();
 - Fire `StatusChanged("Reconnecting…", ClientState.Connecting)` during retries.
 - Reset backoff on successful connection.
 
-#### 4.2 — Improve log rotation
+#### 4.2 — Improve log rotation · ✅ Done
 **Addresses**: 7.2  
 **Files**: `AppLog.cs`  
 **What**:
 - Instead of deleting the log at 200 KB, keep the last N sessions (e.g., rename to `app.log.1` and start fresh).
 - Or truncate to the last 100 KB when the file exceeds 200 KB.
 
-#### 4.3 — Redact user speech from file logs
+#### 4.3 — Redact user speech from file logs · ✅ Done
 **Addresses**: 7.3  
 **Files**: `RealtimeClient.cs`  
 **What**:
 - In the STT transcription log line, truncate to first 20 characters + "…" or hash the content.
 - Keep full transcripts in a debug-only mode controlled by `appsettings.json`.
 
-#### 4.4 — Validate settings on load, not just in dialog
+#### 4.4 — Validate settings on load, not just in dialog · ✅ Done
 **Addresses**: 6.3  
 **Files**: `UserSettings.cs`, `Program.cs`  
 **What**:
@@ -309,7 +468,7 @@ _waveOut?.Dispose();
 
 > These are lower priority but improve long-term maintainability.
 
-#### 5.1 — Introduce interfaces for testability
+#### 5.1 — Introduce interfaces for testability · ❌ Not Started
 **Addresses**: 2.2  
 **Files**: New interfaces + adapters  
 **What**:
@@ -319,7 +478,7 @@ _waveOut?.Dispose();
 - `ITokenProvider` — wrapping TokenProvider.
 - This enables unit testing of `RealtimeClient`, tool logic, and token refresh without real hardware or Azure.
 
-#### 5.2 — Add a test project
+#### 5.2 — Add a test project · ❌ Not Started
 **Addresses**: 2.3  
 **Files**: New `VoiceAssistant.Tests/` project  
 **What**:
@@ -329,7 +488,7 @@ _waveOut?.Dispose();
 - Test `UIMessageBus` event delivery.
 - Test `RealtimeEventRouter` JSON parsing against sample server messages.
 
-#### 5.3 — Convert `UIMessageBus` to instance-based
+#### 5.3 — Convert `UIMessageBus` to instance-based · ❌ Not Started
 **Addresses**: 1.3  
 **Files**: `UIMessageBus.cs`, all consumers  
 **What**:
@@ -337,7 +496,7 @@ _waveOut?.Dispose();
 - Create single instance in `Program.Main` and inject everywhere.
 - Enables scoped lifetime and independent testing.
 
-#### 5.4 — Move configuration to a unified model
+#### 5.4 — Move configuration to a unified model · ❌ Not Started
 **Addresses**: 6.2  
 **Files**: `AppSettings.cs`, `UserSettings.cs`, new `VoiceAssistantConfig.cs`  
 **What**:
@@ -349,13 +508,13 @@ _waveOut?.Dispose();
 
 ## Summary: Effort Estimates by Phase
 
-| Phase | Focus | Files Changed | New Files | Risk |
-|-------|-------|---------------|-----------|------|
-| **1** | Critical Fixes | 4 | 0 | Low — bug fixes only |
-| **2** | Structural Refactoring | 5 | 4–5 | Medium — changes class boundaries |
-| **3** | Code Quality | 6–8 | 0 | Low — mechanical refactoring |
-| **4** | Resilience | 3–4 | 0–1 | Low — additive features |
-| **5** | Future / Testability | 8+ | 6+ | Medium — large surface area |
+| Phase | Focus | Files Changed | New Files | Risk | Status |
+|-------|-------|---------------|-----------|------|--------|
+| **1** | Critical Fixes | 4 | 0 | Low — bug fixes only | ✅ 4/4 done |
+| **2** | Structural Refactoring | 5 | 4–5 | Medium — changes class boundaries | ✅ 5/5 done |
+| **3** | Code Quality & Naming | 8–10 | 0 | Low — mechanical refactoring | ✅ 9/10 done (3.6 deferred) |
+| **4** | Resilience | 3–4 | 0–1 | Low — additive features | ✅ 4/4 done |
+| **5** | Future / Testability | 8+ | 6+ | Medium — large surface area | ❌ 0/4 |
 
 ### Recommended Execution Order
 

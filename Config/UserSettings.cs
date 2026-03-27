@@ -1,6 +1,8 @@
-using Newtonsoft.Json;
+using System.Text.Json;
+using VoiceAssistant.Auth;
+using VoiceAssistant.Infrastructure;
 
-namespace VoiceAssistant;
+namespace VoiceAssistant.Config;
 
 /// <summary>
 /// User-facing settings saved to %APPDATA%\VoiceAssistant\settings.json.
@@ -32,13 +34,19 @@ public sealed class UserSettings
 
     private static string SettingsPath => Path.Combine(SettingsDir, "settings.json");
 
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        WriteIndented = true,
+    };
+
     public static UserSettings Load()
     {
         if (!File.Exists(SettingsPath)) return new UserSettings();
         try
         {
             var json = File.ReadAllText(SettingsPath);
-            return JsonConvert.DeserializeObject<UserSettings>(json) ?? new UserSettings();
+            return JsonSerializer.Deserialize<UserSettings>(json, JsonOptions) ?? new UserSettings();
         }
         catch { return new UserSettings(); }
     }
@@ -46,7 +54,7 @@ public sealed class UserSettings
     public void Save()
     {
         Directory.CreateDirectory(SettingsDir);
-        File.WriteAllText(SettingsPath, JsonConvert.SerializeObject(this, Formatting.Indented));
+        File.WriteAllText(SettingsPath, JsonSerializer.Serialize(this, JsonOptions));
     }
 
     public static void Delete()
@@ -86,5 +94,22 @@ public sealed class UserSettings
         return Uri.TryCreate(normalised, UriKind.Absolute, out var uri)
             && uri.Scheme == "https"
             && uri.Host.Length > 4;
+    }
+
+    /// <summary>
+    /// Validates settings integrity. If endpoint or deployment name are invalid,
+    /// resets <see cref="IsConfigured"/> to false so the setup dialog re-appears.
+    /// </summary>
+    public void Validate()
+    {
+        if (!IsConfigured) return;
+
+        if (string.IsNullOrWhiteSpace(Endpoint) ||
+            !IsValidEndpoint(Endpoint) ||
+            string.IsNullOrWhiteSpace(DeploymentName))
+        {
+            AppLog.Warn("UserSettings.Validate: invalid endpoint or deployment — resetting IsConfigured.");
+            IsConfigured = false;
+        }
     }
 }

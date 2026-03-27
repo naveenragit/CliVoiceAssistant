@@ -1,4 +1,8 @@
-namespace VoiceAssistant;
+using VoiceAssistant.Auth;
+using VoiceAssistant.Config;
+using VoiceAssistant.Infrastructure;
+
+namespace VoiceAssistant.UI;
 
 /// <summary>
 /// Inline setup overlay — a Panel child of MainForm that appears over the
@@ -32,7 +36,7 @@ public sealed class SetupOverlay : Panel
 
     // ── State ─────────────────────────────────────────────────────────────────
     private readonly TokenProvider           _tokens;
-    private bool                             _authenticated;
+    private bool                             _isAuthenticated;
     private CancellationTokenSource          _signInCts = new();
     private bool UseAad => _radioAad.Checked;
 
@@ -237,8 +241,8 @@ public sealed class SetupOverlay : Panel
         _radioApiKey.Checked = existing.AuthMode == "apikey";
 
         // If already signed in via AAD, reflect that
-        _authenticated = existing.IsConfigured && existing.AuthMode == "aad";
-        if (_authenticated) SetAuthStatus("✓ Previously signed in", ok: true);
+        _isAuthenticated = existing.IsConfigured && existing.AuthMode == "aad";
+        if (_isAuthenticated) SetAuthStatus("✓ Previously signed in", ok: true);
 
         SyncSections();
         UpdateSaveButton();
@@ -277,7 +281,7 @@ public sealed class SetupOverlay : Panel
             msg => InvokeIfRequired(() => SetAuthStatus(msg, ok: null)),
             _signInCts.Token);
 
-        _authenticated     = ok;
+        _isAuthenticated     = ok;
         _spinner.Visible   = false;
         _signInBtn.Enabled = true;
         SetAuthStatus(ok ? "✓ Signed in" : "Failed — try again", ok);
@@ -324,7 +328,7 @@ public sealed class SetupOverlay : Panel
     {
         bool endpointOk   = UserSettings.IsValidEndpoint(_endpointBox.Text);
         bool deploymentOk = !string.IsNullOrWhiteSpace(_deploymentBox.Text);
-        bool authOk       = UseAad ? _authenticated : !string.IsNullOrWhiteSpace(_apiKeyBox.Text);
+        bool authOk       = UseAad ? _isAuthenticated : !string.IsNullOrWhiteSpace(_apiKeyBox.Text);
         _saveBtn.Enabled  = endpointOk && deploymentOk && authOk;
     }
 

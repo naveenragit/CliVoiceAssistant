@@ -1,3 +1,9 @@
+using VoiceAssistant.Auth;
+using VoiceAssistant.Config;
+using VoiceAssistant.Infrastructure;
+using VoiceAssistant.Tools;
+using VoiceAssistant.UI;
+
 namespace VoiceAssistant;
 
 static class Program
@@ -10,12 +16,16 @@ static class Program
         ApplicationConfiguration.Initialize();
 
         var settings = UserSettings.Load();
+        settings.Validate();
         var tokens   = new TokenProvider();
 
         // Apply copilot CLI injection settings from appsettings.json
         var appCfg = AppSettings.Load();
-        CopilotCliTool.InstructionSuffix = appCfg.Copilot.InstructionSuffix;
-        CopilotCliTool.AutoSubmit        = appCfg.Copilot.AutoSubmit;
+        var copilotCli = new CopilotCliTool
+        {
+            InstructionSuffix = appCfg.Copilot.InstructionSuffix,
+            AutoSubmit        = appCfg.Copilot.AutoSubmit,
+        };
 
         // Accept --session=<id> to resume a Copilot CLI session
         foreach (var arg in args)
@@ -25,7 +35,7 @@ static class Program
                 var sid = arg.Substring("--session=".Length).Trim();
                 if (!string.IsNullOrEmpty(sid))
                 {
-                    CopilotCliTool.ResumeSessionId = sid;
+                    copilotCli.ResumeSessionId = sid;
                     AppLog.Info($"Program: resuming Copilot CLI session {sid}");
                 }
             }
@@ -35,7 +45,7 @@ static class Program
         AppDomain.CurrentDomain.ProcessExit += (_, _) => Cleanup();
         Application.ApplicationExit += (_, _) => Cleanup();
 
-        Application.Run(new MainForm(settings, tokens));
+        Application.Run(new MainForm(settings, tokens, copilotCli));
     }
 
     private static bool _cleaned;
