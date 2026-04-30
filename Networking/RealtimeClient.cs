@@ -63,9 +63,14 @@ public sealed class RealtimeClient : IAsyncDisposable
     private volatile bool _isConnected;
     private volatile bool _isModelSpeaking;    // suppress mic echo during model output
     private volatile bool _isPttActive;        // true only while PTT button/key is held
+    private volatile bool _isAlwaysOn;         // true = server VAD; false = manual PTT
     private volatile bool _isResponseInProgress; // true between response.created and response.done
     private volatile bool _isUserDisconnected;   // true when user explicitly disconnects (suppresses reconnect)
     private volatile bool _lastResponseFailed;   // true when response.done status=failed (for SpeakText retry)
+    private volatile bool _responseHadAudio;     // true if the current response sent any audio delta
+
+    // Serializes all WebSocket sends — ClientWebSocket does not support concurrent sends.
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
 
     // Tracks bytes of audio sent during the current PTT press so we can skip
     // commit if the user tapped too briefly (server requires ≥100ms).
@@ -90,6 +95,7 @@ public sealed class RealtimeClient : IAsyncDisposable
     public void StartPtt()
     {
         if (!_isConnected) return;
+        if (_isAlwaysOn) return;   // PTT is a no-op in always-on mode
 
         // Barge-in: if the model is speaking, interrupt it immediately
         if (_isModelSpeaking || _isResponseInProgress)
@@ -285,10 +291,18 @@ public sealed class RealtimeClient : IAsyncDisposable
             input_audio_format       = "pcm16",
             output_audio_format      = "pcm16",
             input_audio_transcription = new { model = "whisper-1" },
-            // Disable server VAD — we use pure PTT (manual commit on release).
-            // With VAD enabled, the server auto-commits audio mid-hold and creates
-            // a race where our explicit commit finds an empty buffer.
-            turn_detection           = (object?)null,
+            // PTT mode disables server VAD so we can manually commit audio on release.
+            // Always-on mode uses server VAD to auto-detect speech boundaries.
+            turn_detection           = _isAlwaysOn
+                ? (object)new
+                {
+                    type                = "server_vad",
+                    threshold           = _cfg.Voice.VadThreshold,
+                    prefix_padding_ms   = 300,
+                    silence_duration_ms = _cfg.Voice.SilenceDurationMs,
+                    create_response     = true,
+                }
+                : null,
             instructions = _cfg.Voice.Instructions +
                 UserMemory.ToSystemPromptBlock() +
                 " ABSOLUTE RULE: Forward EVERY user request to Copilot CLI using send_to_copilot_cli." +
@@ -299,6 +313,10 @@ public sealed class RealtimeClient : IAsyncDisposable
                 " 1) The user explicitly says 'remember that...' → use remember_fact tool" +
                 " 2) The user says 'stop', 'cancel', 'never mind' → acknowledge and stop" +
                 " 3) The user asks 'what do you know about me' → use recall_facts" +
+                " 4) The user asks about their EMAIL (read emails, send email, reply to email," +
+                "    check inbox, unread messages, email from someone) → use read_emails or send_email" +
+                " 5) The user asks about TEAMS messages (read chats, Teams messages, reply on Teams," +
+                "    send a Teams message, what did someone say on Teams) → use read_teams_chats or send_teams_message" +
                 " For EVERYTHING else — questions, commands, vague requests, unclear asks —" +
                 " forward to Copilot CLI immediately. Do not think, do not interpret, do not" +
                 " ask follow-up questions. Just forward it." +
@@ -307,6 +325,9 @@ public sealed class RealtimeClient : IAsyncDisposable
                 " 'yes', 'pick that'), use the select_option tool to navigate with arrow keys" +
                 " and press enter. For option N, send 'down' with repeat=N-1, then send 'enter'." +
                 " If the user just says 'yes' or confirms, send 'enter' to select the current option." +
+                " When reading emails aloud, summarize: say sender, subject, and a brief preview." +
+                " When reading Teams chats, say who sent what and when." +
+                " Before sending any email or Teams message, confirm with the user first." +
                 " When Copilot CLI responds, read the key information aloud concisely." +
                 " Always use submit=true.",
             temperature  = 0.6,
@@ -327,8 +348,10 @@ public sealed class RealtimeClient : IAsyncDisposable
 
     private async void OnMicData(object? sender, AudioCapturedEventArgs e)
     {
-        // Only transmit while PTT is held and the model isn't speaking
-        if (!_isConnected || _isModelSpeaking || !_isPttActive) return;
+        // Transmit while PTT is held (PTT mode) or always (always-on mode).
+        // Echo guard: suppress mic while model is playing back its own audio.
+        if (!_isConnected || _isModelSpeaking) return;
+        if (!_isPttActive && !_isAlwaysOn) return;
         if (_webSocket?.State != WebSocketState.Open) return;
 
         // Count bytes so StopPtt can verify minimum audio length
@@ -340,7 +363,7 @@ public sealed class RealtimeClient : IAsyncDisposable
             {
                 type  = "input_audio_buffer.append",
                 audio = Convert.ToBase64String(e.Buffer, 0, e.BytesRecorded),
-            });
+            }, skipIfBusy: true);
         }
         catch { /* ignore — connection may be closing */ }
     }
@@ -517,6 +540,7 @@ public sealed class RealtimeClient : IAsyncDisposable
         AppLog.Info($"[TIMING] +{_turnTimer.ElapsedMilliseconds}ms  response.created (server generating audio)");
         _isModelSpeaking      = true;
         _isResponseInProgress = true;
+        _responseHadAudio     = false;   // reset — will be set if audio deltas arrive
         StatusChanged?.Invoke(this, new StatusEventArgs("Speaking…", ClientState.Speaking));
     }
 
@@ -525,6 +549,7 @@ public sealed class RealtimeClient : IAsyncDisposable
         var base64AudioData = serverEvent["delta"]?.GetValue<string>();
         if (!string.IsNullOrEmpty(base64AudioData))
         {
+            _responseHadAudio = true;
             if (!_firstAudioDelta)
             {
                 AppLog.Info($"[TIMING] +{_turnTimer.ElapsedMilliseconds}ms  first audio chunk received ← playback starts here");
@@ -618,6 +643,15 @@ public sealed class RealtimeClient : IAsyncDisposable
             AppLog.Error($"response.done FAILED: {reason}");
         }
         _isResponseInProgress = false;
+
+        // If the response had no audio (e.g. pure tool call), HandleAudioDone never fires,
+        // so _isModelSpeaking would be stuck true and permanently gate the mic.
+        // Safely release it here when no audio was produced.
+        if (!_responseHadAudio)
+        {
+            _isModelSpeaking = false;
+            AppLog.Info("response.done with no audio — mic gate released");
+        }
     }
 
     private void HandleToolCallStarted(JsonNode serverEvent)
@@ -721,13 +755,109 @@ public sealed class RealtimeClient : IAsyncDisposable
         StatusChanged?.Invoke(this, new StatusEventArgs("Disconnected", ClientState.Idle));
     }
 
+    // ── Always-on mode ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Switches between always-on (server VAD) and PTT mode at runtime.
+    /// Sends a session.update so the server immediately switches turn-detection strategy.
+    /// </summary>
+    public async Task SetAlwaysOnAsync(bool enabled)
+    {
+        _isAlwaysOn  = enabled;
+        _isPttActive = false;                          // ensure PTT is released
+        Interlocked.Exchange(ref _pttAudioBytes, 0);
+
+        if (enabled)
+        {
+            await SendJsonAsync(new
+            {
+                type    = "session.update",
+                session = new
+                {
+                    turn_detection = new
+                    {
+                        type                = "server_vad",
+                        threshold           = _cfg.Voice.VadThreshold,
+                        prefix_padding_ms   = 300,
+                        silence_duration_ms = _cfg.Voice.SilenceDurationMs,
+                        create_response     = true,
+                    }
+                }
+            });
+            AppLog.Info("Always-on: server VAD enabled");
+            SetStatus("Always listening…", ClientState.Listening);
+        }
+        else
+        {
+            await SendJsonAsync(new
+            {
+                type    = "session.update",
+                session = new { turn_detection = (object?)null }
+            });
+            // Discard any audio the server VAD was accumulating mid-turn
+            await SendJsonAsync(new { type = "input_audio_buffer.clear" });
+            AppLog.Info("Always-on: disabled, returned to PTT mode");
+            SetStatus("PTT mode", ClientState.Listening);
+        }
+    }
+
+    /// <summary>
+    /// Updates the server VAD silence threshold live. Safe to call in both PTT and always-on mode:
+    /// stores the value for next always-on activation; sends session.update immediately if
+    /// currently in always-on mode so the change takes effect without reconnecting.
+    /// </summary>
+    public async Task UpdateVadSilenceAsync(int silenceDurationMs)
+    {
+        _cfg.Voice.SilenceDurationMs = silenceDurationMs;
+        if (!_isAlwaysOn || !_isConnected) return;
+
+        await SendJsonAsync(new
+        {
+            type    = "session.update",
+            session = new
+            {
+                turn_detection = new
+                {
+                    type                = "server_vad",
+                    threshold           = _cfg.Voice.VadThreshold,
+                    prefix_padding_ms   = 300,
+                    silence_duration_ms = silenceDurationMs,
+                    create_response     = true,
+                }
+            }
+        });
+        AppLog.Info($"VAD silence_duration_ms updated to {silenceDurationMs}ms");
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private async Task SendJsonAsync(object payload)
+    /// <param name="skipIfBusy">
+    /// When true (used for high-frequency audio chunks), drops the message instead
+    /// of queuing if a send is already in progress. Prevents buffer build-up.
+    /// </param>
+    private async Task SendJsonAsync(object payload, bool skipIfBusy = false)
     {
         if (_webSocket?.State != WebSocketState.Open) return;
         var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload));
-        await _webSocket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, _cancellationTokenSource.Token);
+
+        if (skipIfBusy)
+        {
+            if (!await _sendLock.WaitAsync(0)) return;
+        }
+        else
+        {
+            await _sendLock.WaitAsync(_cancellationTokenSource.Token);
+        }
+
+        try
+        {
+            if (_webSocket?.State != WebSocketState.Open) return;
+            await _webSocket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, _cancellationTokenSource.Token);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
     }
 
     private void SetStatus(string msg, ClientState state) =>

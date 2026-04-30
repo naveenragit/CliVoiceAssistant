@@ -100,18 +100,17 @@ public sealed class EmbeddedTerminal : IDisposable
         var copilotPath = FindCopilotExe();
         AppLog.Info($"EmbeddedTerminal: launching copilot.exe directly at {copilotPath}");
 
+        // Pass session ID via --resume arg (UseShellExecute = true is needed for
+        // WindowStyle and is incompatible with EnvironmentVariables).
+        var resumeArg = string.IsNullOrEmpty(sessionId) ? "" : $" --resume={sessionId}";
         var psi = new ProcessStartInfo
         {
             FileName = "cmd.exe",
-            Arguments = $"/c \"{copilotPath}\"",
+            Arguments = $"/c \"{copilotPath}\"{resumeArg}",
             WorkingDirectory = workingDirectory,
             UseShellExecute = true,
             WindowStyle = ProcessWindowStyle.Minimized,
         };
-
-        // Pass session ID via environment variable so copilot picks up context
-        if (!string.IsNullOrEmpty(sessionId))
-            psi.EnvironmentVariables["COPILOT_SESSION_ID"] = sessionId;
 
         _process = Process.Start(psi);
         if (_process == null)

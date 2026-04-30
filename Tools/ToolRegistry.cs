@@ -35,7 +35,14 @@ public sealed class ToolRegistry
     }
 
     /// <summary>All tool definitions to send in session.update.</summary>
-    public object[] Definitions => [CopilotCliTool.ToolDefinition, SelectOptionToolDefinition, RememberToolDefinition];
+    public object[] Definitions
+    {
+        get
+        {
+            var defs = new List<object> { CopilotCliTool.ToolDefinition, SelectOptionToolDefinition, RememberToolDefinition };
+            return defs.ToArray();
+        }
+    }
 
     /// <summary>
     /// Execute a tool by name and return the JSON result string.

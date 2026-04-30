@@ -60,6 +60,7 @@ public sealed class MainForm : Form
     private RealtimeClient?         _client;
     private ChatRenderer?           _chatRenderer;
     private bool                    _isConnected;
+    private bool                    _isAlwaysOn;   // always-on listening mode state
     private EmbeddedTerminal?       _terminal;   // embedded Copilot CLI terminal
     private NarrationServer?        _narration;  // local WebSocket server for CLI narration
 
@@ -72,6 +73,9 @@ public sealed class MainForm : Form
     private Button        _closeBtn     = null!;
     private Button        _micBtn       = null!;   // title-bar indicator
     private Button        _pttBtn       = null!;   // big push-to-talk button
+    private Button        _alwaysOnBtn  = null!;   // always-on listening toggle
+    private TrackBar      _vadSlider    = null!;   // response-lag slider (always-on mode)
+    private Label         _vadLabel     = null!;   // displays current lag value
     private Label         _pttLabel     = null!;   // "Hold to talk  /  Space"
     private Panel         _termPanel    = null!;   // hosts the embedded terminal
     private SplitContainer _splitter    = null!;   // terminal (top) / chat (bottom)
@@ -230,8 +234,60 @@ public sealed class MainForm : Form
             Anchor    = AnchorStyles.Left | AnchorStyles.Top,
         };
 
-        // Bottom bar only has the PTT button — label goes in the layout below
+        // ── Always-on listening toggle ─────────────────────────────────────────
+        _alwaysOnBtn = new Button
+        {
+            Text      = "◯  Always on",
+            Size      = new Size(100, 28),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(25, 30, 45),
+            ForeColor = MutedColor,
+            Font      = new Font("Segoe UI", 8.5f),
+            Cursor    = Cursors.Hand,
+            TabStop   = false,
+        };
+        _alwaysOnBtn.FlatAppearance.BorderColor        = Color.FromArgb(50, 60, 80);
+        _alwaysOnBtn.FlatAppearance.BorderSize         = 1;
+        _alwaysOnBtn.FlatAppearance.MouseOverBackColor = Color.FromArgb(35, 45, 65);
+        _alwaysOnBtn.Click += (_, _) => _ = ToggleAlwaysOnAsync();
+        _tooltip.SetToolTip(_alwaysOnBtn, "Toggle always-on listening — uses server voice detection instead of push-to-talk");
+
+        // ── Response-lag slider (always-on mode) ──────────────────────────────
+        int initialLagMs = _cfg.Voice.SilenceDurationMs;
+        _vadLabel = new Label
+        {
+            Text      = $"Lag: {initialLagMs / 1000.0:0.#}s",
+            ForeColor = MutedColor,
+            Font      = new Font("Segoe UI", 7.5f),
+            AutoSize  = true,
+            BackColor = TitleBg,
+        };
+        _vadSlider = new TrackBar
+        {
+            Minimum       = 3,    // 300 ms
+            Maximum       = 25,   // 2500 ms
+            SmallChange   = 1,
+            LargeChange   = 3,
+            TickFrequency = 5,
+            TickStyle     = TickStyle.None,
+            Value         = Math.Clamp(initialLagMs / 100, 3, 25),
+            Width         = 140,
+            BackColor     = TitleBg,
+            TabStop       = false,
+        };
+        _vadSlider.ValueChanged += (_, _) =>
+        {
+            int ms = _vadSlider.Value * 100;
+            _vadLabel.Text = $"Lag: {ms / 1000.0:0.#}s";
+            if (_client != null) _ = _client.UpdateVadSilenceAsync(ms);
+        };
+        _tooltip.SetToolTip(_vadSlider, "How long you must pause before the assistant responds (always-on mode). Increase if it cuts you off mid-sentence.");
+
+        // Bottom bar: PTT button (centered) + always-on toggle (right of PTT) + lag slider (far right)
         bottomBar.Controls.Add(_pttBtn);
+        bottomBar.Controls.Add(_alwaysOnBtn);
+        bottomBar.Controls.Add(_vadLabel);
+        bottomBar.Controls.Add(_vadSlider);
         bottomBar.Resize += (_, _) => CentrePttButton(bottomBar);
 
         // PTT button mouse events
@@ -466,6 +522,15 @@ public sealed class MainForm : Form
             await _client.ConnectAsync();
             _isConnected = true;
             SetMicState(connected: true);
+
+            // Reapply always-on if it was active before reconnect.
+            // (Auto-reconnect inside RealtimeClient preserves _isAlwaysOn on the same instance;
+            //  manual reconnect creates a new instance so we re-apply here.)
+            if (_isAlwaysOn)
+            {
+                await _client.SetAlwaysOnAsync(true);
+                UpdateAlwaysOnButton();
+            }
             UIMessageBus.PushSystem("Connected — speak to start.", readAloud: false);
 
             // Start token health monitoring
@@ -599,6 +664,60 @@ public sealed class MainForm : Form
     private void PttPress()  => _pttController.Press(_isConnected);
     private void PttRelease() => _pttController.Release();
 
+    // ── Always-on toggle ──────────────────────────────────────────────────────
+
+    private async Task ToggleAlwaysOnAsync()
+    {
+        if (!_isConnected || _client == null) return;
+
+        _isAlwaysOn = !_isAlwaysOn;
+
+        // Release PTT before switching to always-on so _isPttActive is never stuck true
+        if (_isAlwaysOn) PttRelease();
+
+        UpdateAlwaysOnButton();
+
+        try
+        {
+            await _client.SetAlwaysOnAsync(_isAlwaysOn);
+        }
+        catch (Exception ex)
+        {
+            // Roll back on failure
+            _isAlwaysOn = !_isAlwaysOn;
+            UpdateAlwaysOnButton();
+            AppLog.Error($"ToggleAlwaysOnAsync failed: {ex.Message}");
+            UIMessageBus.PushSystem($"⚠ Always-on toggle failed: {ex.Message}", readAloud: false);
+        }
+    }
+
+    private void UpdateAlwaysOnButton()
+    {
+        if (_isAlwaysOn)
+        {
+            _alwaysOnBtn.BackColor                        = Color.FromArgb(5, 150, 105); // emerald green
+            _alwaysOnBtn.ForeColor                        = Color.White;
+            _alwaysOnBtn.FlatAppearance.BorderSize        = 0;
+            _alwaysOnBtn.Text                             = "●  Always on";
+            _pttBtn.Enabled                               = false;
+            _pttBtn.BackColor                             = Color.FromArgb(50, 35, 85);  // dimmed
+            _pttLabel.Text                                = "Always listening…";
+        }
+        else
+        {
+            _alwaysOnBtn.BackColor                        = Color.FromArgb(25, 30, 45);
+            _alwaysOnBtn.ForeColor                        = MutedColor;
+            _alwaysOnBtn.FlatAppearance.BorderSize        = 1;
+            _alwaysOnBtn.Text                             = "◯  Always on";
+            _pttBtn.Enabled                               = _isConnected;
+            _pttBtn.BackColor                             = _isConnected
+                ? Color.FromArgb(201, 60, 158)
+                : Color.FromArgb(50, 35, 85);
+            MakeRound(_pttBtn);
+            _pttLabel.Text = "Hold to talk  ·  Space";
+        }
+    }
+
     // ── Title bar helpers ─────────────────────────────────────────────────────
 
     private static Button MakeTitleButton(string text, string tip, ToolTip tooltip)
@@ -630,7 +749,18 @@ public sealed class MainForm : Form
     private void CentrePttButton(Panel bar)
     {
         int cx = bar.ClientSize.Width / 2;
-        _pttBtn.Location = new Point(cx - _pttBtn.Width / 2, 14);
+        _pttBtn.Location      = new Point(cx - _pttBtn.Width / 2, 14);
+        // Position always-on toggle to the right of the PTT button, vertically centered
+        _alwaysOnBtn.Location = new Point(
+            _pttBtn.Right + 14,
+            _pttBtn.Top + (_pttBtn.Height - _alwaysOnBtn.Height) / 2);
+
+        // Response-lag slider group: far right of the bottom bar
+        int sliderX = bar.ClientSize.Width - _vadSlider.Width - 14;
+        int groupH  = _vadLabel.PreferredHeight + 4 + _vadSlider.Height;
+        int groupY  = (bar.ClientSize.Height - groupH) / 2;
+        _vadLabel.Location  = new Point(sliderX + (_vadSlider.Width - _vadLabel.PreferredWidth) / 2, groupY);
+        _vadSlider.Location = new Point(sliderX, groupY + _vadLabel.PreferredHeight + 4);
     }
 
     private void LayoutTitleButtons()
